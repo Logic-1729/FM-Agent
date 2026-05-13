@@ -183,7 +183,9 @@ def _parse_spec_conditions(spec):
     return pre, post
 
 
-def reasoner(func, spec, info, language):
+def reasoner(func, spec, info, language, trace_context=None):
+    trace_context = trace_context or {}
+    trace_dir = trace_context.get("trace_dir")
     # Step 1: Parse pre-condition and post-condition directly from spec
     pre_condition, spec_post_condition = _parse_spec_conditions(spec)
     if not pre_condition or not spec_post_condition:
@@ -196,7 +198,21 @@ def reasoner(func, spec, info, language):
     current_pre = pre_condition
     for i, block in enumerate(blocks):
         # Generate post-condition using Claude Sonnet 4.6
-        post_condition = _generate_block_post_condition(block, current_pre, info, language)
+        trace_meta = {
+            "function_id": trace_context.get("function_id"),
+            "function_file": trace_context.get("function_file"),
+            "language": language,
+            "block_index": i,
+            "block_count": len(blocks),
+        }
+        post_condition = _generate_block_post_condition(
+            block,
+            current_pre,
+            info,
+            language,
+            trace_dir=trace_dir,
+            trace_meta=trace_meta,
+        )
         if not post_condition:
             return f"Failed to generate post-condition for block {i+1}."
 
@@ -205,7 +221,13 @@ def reasoner(func, spec, info, language):
         is_last_block = (i == len(blocks) - 1)
         if _has_terminating_statement(block, language) or is_last_block:
             passed, stmts, post_cond, reason = _check_post_implies_spec(
-                block, post_condition, spec_post_condition, info, language
+                block,
+                post_condition,
+                spec_post_condition,
+                info,
+                language,
+                trace_dir=trace_dir,
+                trace_meta=trace_meta,
             )
             if not passed:
                 return (

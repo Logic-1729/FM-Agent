@@ -1,8 +1,14 @@
 from config import *
 from .llm_client import _openrouter_client, _retry_create, _llm_call, _extract_tagged
+from .trace_writer import (
+    new_event_id,
+    record_llm_exchange,
+    utc_now_iso,
+)
 
 
-def _generate_block_post_condition(block, pre_condition, knowledge, language):
+def _generate_block_post_condition(block, pre_condition, knowledge, language,
+                                   trace_dir=None, trace_meta=None):
     info_str = f"\nAdditional context:\n{knowledge}" if knowledge else ""
     messages = [
         {"role": "system", "content": (
@@ -21,7 +27,20 @@ def _generate_block_post_condition(block, pre_condition, knowledge, language):
             "Generate the post-condition. Wrap it within [POST_START] and [POST_END]."
         )}
     ]
-    return _llm_call(_openrouter_client, REASONER_POST_CONDITION_MODEL, messages, "POST_START", "POST_END")
+    meta = {
+        "purpose": "generate_block_post_condition",
+        "summary": "Generated post-condition for code block",
+        **(trace_meta or {}),
+    }
+    return _llm_call(
+        _openrouter_client,
+        REASONER_POST_CONDITION_MODEL,
+        messages,
+        "POST_START",
+        "POST_END",
+        trace_dir=trace_dir,
+        trace_meta=meta,
+    )
 
 
 _LANGUAGE_EXPERTISE = {
@@ -133,7 +152,8 @@ _LANGUAGE_EXPERTISE = {
 }
 
 
-def _check_post_implies_spec(block, post_condition, spec_post_condition, knowledge, language):
+def _check_post_implies_spec(block, post_condition, spec_post_condition, knowledge, language,
+                             trace_dir=None, trace_meta=None):
     info_str = f"\nAdditional context:\n{knowledge}" if knowledge else ""
     lang_expertise = _LANGUAGE_EXPERTISE.get(language.lower(), f"You are an expert in logic, formal verification, and {language} programming. ")
     messages = [
@@ -165,13 +185,64 @@ def _check_post_implies_spec(block, post_condition, spec_post_condition, knowled
             "Provide a specific counterexample if any case is missing."
         )}
     ]
-    for _ in range(MAX_SPC_ITER):
-        response = _retry_create(_openrouter_client, REASONER_SPEC_CHECK_MODEL, messages)
+    trace_meta = trace_meta or {}
+    for attempt in range(1, MAX_SPC_ITER + 1):
+        event_id = new_event_id("llm")
+        started = utc_now_iso()
+        response = None
+        try:
+            response = _retry_create(_openrouter_client, REASONER_SPEC_CHECK_MODEL, messages)
+        except Exception as exc:
+            event = {
+                "event_id": event_id,
+                "type": "llm_call",
+                "stage": "verification",
+                "status": "error",
+                "start_time": started,
+                "end_time": utc_now_iso(),
+                "summary": f"LLM implication check failed: {exc}",
+                "metadata": {
+                    **trace_meta,
+                    "purpose": "check_post_implies_spec",
+                    "model": REASONER_SPEC_CHECK_MODEL,
+                    "attempt": attempt,
+                    "error": str(exc),
+                },
+            }
+            record_llm_exchange(trace_dir, event_id, event, messages)
+            raise
         check = _extract_tagged(response, "CHECK_START", "CHECK_END")
+        stmts = _extract_tagged(response, "STMT_START", "STMT_END")
+        reason = _extract_tagged(response, "REASON_START", "REASON_END")
+        if check:
+            status = "mismatch" if "yes" in check.lower() else "success"
+        else:
+            status = "format_error"
+        event = {
+            "event_id": event_id,
+            "type": "llm_call",
+            "stage": "verification",
+            "status": status,
+            "start_time": started,
+            "end_time": utc_now_iso(),
+            "summary": "Checked whether actual post-condition implies the spec",
+            "metadata": {
+                **trace_meta,
+                "purpose": "check_post_implies_spec",
+                "model": REASONER_SPEC_CHECK_MODEL,
+                "attempt": attempt,
+                "parsed": {
+                    "CHECK_START": check,
+                    "STMT_START": stmts,
+                    "REASON_START": reason,
+                },
+            },
+        }
+        record_llm_exchange(trace_dir, event_id, event, messages, response)
         if check:
             if "yes" in check.lower():
-                stmts = _extract_tagged(response, "STMT_START", "STMT_END") or "(unable to extract)"
-                reason = _extract_tagged(response, "REASON_START", "REASON_END") or check
+                stmts = stmts or "(unable to extract)"
+                reason = reason or check
                 return False, stmts, post_condition, reason
             else:
                 return True, None, None, None

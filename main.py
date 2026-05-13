@@ -3,6 +3,12 @@ from src.file_utils import collect_file_names, is_file_ready
 from src.verification import streaming_reasoner
 from src.extract import run_extraction, EXT_TO_LANG
 from src.generate_topdown_layers import generate_topdown_layers
+from src.opencode_trace import (
+    finish_opencode_trace,
+    function_id_from_extracted_path,
+    run_opencode_traced,
+    start_opencode_traced,
+)
 import os
 import sys
 import json
@@ -145,11 +151,21 @@ def _run_opencode_step(proj_dir, work_dir, script_dir, log_file,
         else:
             prompt = ("Continue where you left off. The previous run was interrupted by a network error. "
                       f"Check what has already been done and only complete the remaining steps. {fm_reminder}")
+        command = ["opencode", "run", "--model", f"openrouter/{model}",
+                   "--file", os.path.join(proj_dir, "fm_agent", md_name), "--", prompt]
         try:
-            subprocess.run(
-                ["opencode", "run", "--model", f"openrouter/{model}",
-                 "--file", os.path.join(proj_dir, "fm_agent", md_name), "--", prompt],
-                cwd=proj_dir, env={**os.environ, "PWD": os.path.abspath(proj_dir)}, check=True, stdout=log_file, stderr=log_file,
+            run_opencode_traced(
+                proj_dir=proj_dir,
+                work_dir=work_dir,
+                command=command,
+                prompt=prompt,
+                stage=stage_label.lower().replace(" ", "_"),
+                log_file=log_file,
+                workflow_file=md_dst,
+                input_files=[f"fm_agent/{md_name}"],
+                output_files=[os.path.relpath(expected_file, proj_dir)],
+                summary=f"OpenCode {stage_label} attempt {attempt}",
+                metadata={"attempt": attempt},
             )
         except subprocess.CalledProcessError as e:
             logging.warning(f"{stage_label} attempt {attempt}: opencode exited with code {e.returncode}")
@@ -225,7 +241,17 @@ def run_pipeline(proj_dir):
         print("[Pipeline] Stage 1/5: AGENTS.md found, skipping opencode init.")
     else:
         print("[Pipeline] Stage 1/5: Initializing opencode...")
-        subprocess.run(["opencode", "run", "--command", "init"], cwd=proj_dir, env={**os.environ, "PWD": os.path.abspath(proj_dir)}, check=True, stdout=log_file, stderr=log_file)
+        command = ["opencode", "run", "--command", "init"]
+        run_opencode_traced(
+            proj_dir=proj_dir,
+            work_dir=work_dir,
+            command=command,
+            prompt="Initialize OpenCode project context.",
+            stage="init",
+            log_file=log_file,
+            output_files=["AGENTS.md"],
+            summary="Initialized OpenCode project context",
+        )
 
     # Copy workflow_setup_extract.md to proj_dir and run opencode against it
     print("[Pipeline] Stage 2/5: Understanding codebase and extracting functions ...")
@@ -256,8 +282,25 @@ def run_pipeline(proj_dir):
         else:
             prompt = ("Continue where you left off. The previous run was interrupted by a network error. "
                       f"Check what has already been done and only complete the remaining steps. {fm_reminder}")
+        command = ["opencode", "run", "--model", f"openrouter/{OPENCODE_SETUP_MODEL}",
+                   "--file", os.path.join(proj_dir, "fm_agent", "workflow_setup_extract.md"), "--", prompt]
         try:
-            subprocess.run(["opencode", "run", "--model", f"openrouter/{OPENCODE_SETUP_MODEL}", "--file", os.path.join(proj_dir, "fm_agent", "workflow_setup_extract.md"), "--", prompt], cwd=proj_dir, env={**os.environ, "PWD": os.path.abspath(proj_dir)}, check=True, stdout=log_file, stderr=log_file)
+            run_opencode_traced(
+                proj_dir=proj_dir,
+                work_dir=work_dir,
+                command=command,
+                prompt=prompt,
+                stage="setup_context",
+                log_file=log_file,
+                workflow_file=workflow_dst,
+                input_files=["fm_agent/workflow_setup_extract.md"],
+                output_files=[
+                    "fm_agent/phases.json",
+                    "fm_agent/spec_prompts/domain_context/engine_overview.txt",
+                ],
+                summary=f"OpenCode setup context attempt {attempt}",
+                metadata={"attempt": attempt},
+            )
         except subprocess.CalledProcessError as e:
             logging.warning(f"Stage 2 attempt {attempt}: opencode exited with code {e.returncode}")
 
@@ -399,9 +442,16 @@ def run_pipeline(proj_dir):
 
                 # Spawn concurrent opencode processes (one per pending batch)
                 spec_procs = []
+                spec_trace_records = []
                 for batch_info in pending_batches:
                     batch_file = batch_info["file"]
                     batch_prompt_rel = os.path.join(batch_rel_dir, batch_file)
+                    batch_prompt_abs = os.path.join(proj_dir, batch_prompt_rel)
+                    function_files = batch_info.get("functions", [])
+                    function_ids = [
+                        function_id_from_extracted_path(func_rel)
+                        for func_rel in function_files
+                    ]
                     fm_reminder = ("IMPORTANT: fm_agent/ is your output workspace, not project source. "
                                     "Do NOT modify any existing project files.")
                     if attempt == 1:
@@ -419,13 +469,35 @@ def run_pipeline(proj_dir):
                             f"that don't have [SPEC] blocks yet. "
                             f"Read fm_agent/spec_prompts/system_prompt.md for the format rules. {fm_reminder}"
                         )
-                    proc = subprocess.Popen(
-                        ["opencode", "run", "--model", f"openrouter/{OPENCODE_SPEC_MODEL}",
-                         "--file", os.path.join(proj_dir, "fm_agent", "workflow_spec_step4_batch.md"),
-                         "--", prompt],
-                        cwd=proj_dir, env={**os.environ, "PWD": os.path.abspath(proj_dir)}, stdout=log_file, stderr=log_file,
+                    command = ["opencode", "run", "--model", f"openrouter/{OPENCODE_SPEC_MODEL}",
+                               "--file", os.path.join(proj_dir, "fm_agent", "workflow_spec_step4_batch.md"),
+                               "--", prompt]
+                    trace_record = start_opencode_traced(
+                        proj_dir=proj_dir,
+                        work_dir=work_dir,
+                        command=command,
+                        prompt=prompt,
+                        stage="spec_generation",
+                        log_file=log_file,
+                        workflow_file=batch_md_dst,
+                        batch_prompt_file=batch_prompt_abs,
+                        function_ids=function_ids,
+                        input_files=[
+                            "fm_agent/workflow_spec_step4_batch.md",
+                            batch_prompt_rel,
+                            "fm_agent/spec_prompts/system_prompt.md",
+                        ],
+                        output_files=function_files,
+                        summary=f"OpenCode spec generation for {batch_file}",
+                        metadata={
+                            "attempt": attempt,
+                            "phase": phase_num,
+                            "layer": layer_idx,
+                            "batch_file": batch_file,
+                        },
                     )
-                    spec_procs.append(proc)
+                    spec_trace_records.append(trace_record)
+                    spec_procs.append(trace_record.proc)
 
                 logging.info(
                     f"Phase {phase_num} Layer {layer_idx} attempt {attempt}: "
@@ -440,6 +512,8 @@ def run_pipeline(proj_dir):
 
                 for proc in spec_procs:
                     proc.wait()
+                for trace_record in spec_trace_records:
+                    finish_opencode_trace(trace_record)
 
                 # Check if any files in this layer received specs
                 specs_generated = sum(

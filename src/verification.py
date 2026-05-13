@@ -1,13 +1,13 @@
-from config import MAX_WORKERS, OPENCODE_BUG_VALIDATION_MODEL
+from config import MAX_WORKERS, OPENCODE_BUG_VALIDATION_MODEL, TRACE_ON
 from .parser import parse_input_function
 from .reasoner import reasoner, _parse_spec_conditions, _sanitize_strings
 from .file_utils import is_file_ready
+from .opencode_trace import function_id_from_result_path, run_opencode_traced
 import os
 import re
 import json
 import time
 import logging
-import subprocess
 
 
 EXT_TO_LANG = {
@@ -89,7 +89,7 @@ def streaming_reasoner(input_dir, output_dir, file_list=None, proj_dir=None, wor
                         processed.add(file_path)
                         language = EXT_TO_LANG.get(ext, "C")
                         future = executor.submit(
-                            _verify_single_file, file_path, input_dir, output_dir, language
+                            _verify_single_file, file_path, input_dir, output_dir, language, work_dir
                         )
                         reasoning_futures[future] = file_path
                         logging.info(f"Submitted: {file_path}")
@@ -212,7 +212,7 @@ def streaming_reasoner(input_dir, output_dir, file_list=None, proj_dir=None, wor
     return processed
 
 
-def _verify_single_file(file_path, input_dir, output_dir, language):
+def _verify_single_file(file_path, input_dir, output_dir, language, work_dir=None):
     """Verify a single file and write the result JSON."""
     # Skip if already verified
     rel = os.path.relpath(file_path, input_dir)
@@ -232,7 +232,15 @@ def _verify_single_file(file_path, input_dir, output_dir, language):
         return file_path, "SKIPPED"
 
     _, spec_post = _parse_spec_conditions(spec)
-    result = reasoner(func, spec, knowledge, language)
+    trace_context = None
+    if TRACE_ON and work_dir:
+        rel_function = os.path.relpath(file_path, input_dir)
+        trace_context = {
+            "trace_dir": os.path.join(work_dir, "trace"),
+            "function_id": os.path.splitext(rel_function)[0].replace(os.sep, "::"),
+            "function_file": os.path.join("extracted_functions", rel_function).replace(os.sep, "/"),
+        }
+    result = reasoner(func, spec, knowledge, language, trace_context=trace_context)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -290,6 +298,7 @@ def _validate_single_bug(result_json_rel, proj_dir, work_dir=None):
     elif parts.startswith("fm_agent/logic_verification_results/"):
         parts = parts[len("fm_agent/logic_verification_results/"):]
     bug_id = os.path.splitext(parts)[0].replace(os.sep, "--").replace("/", "--")
+    function_id = function_id_from_result_path(result_json_rel)
 
     # Read the base bug_validator.md
     base_md_path = os.path.join(script_dir, "md", "bug_validator.md")
@@ -315,14 +324,27 @@ def _validate_single_bug(result_json_rel, proj_dir, work_dir=None):
     os.replace(tmp_path, prompt_path)
 
     log_path = os.path.join(work_dir, "fm_agent.log")
+    command = ["opencode", "run", "--model", f"openrouter/{OPENCODE_BUG_VALIDATION_MODEL}",
+               "--file", prompt_path,
+               "--", "Follow the instructions in the attached file"]
     try:
         with open(log_path, "a") as log_file:
-            subprocess.run(
-                ["opencode", "run", "--model", f"openrouter/{OPENCODE_BUG_VALIDATION_MODEL}",
-                 "--file", prompt_path,
-                 "--", "Follow the instructions in the attached file"],
-                cwd=proj_dir, env={**os.environ, "PWD": os.path.abspath(proj_dir)}, check=True,
-                stdout=log_file, stderr=log_file,
+            run_opencode_traced(
+                proj_dir=proj_dir,
+                work_dir=work_dir,
+                command=command,
+                prompt="Follow the instructions in the attached file",
+                stage="bug_validation",
+                log_file=log_file,
+                workflow_file=prompt_path,
+                function_ids=[function_id],
+                input_files=[prompt_filename, result_json_rel],
+                output_files=[
+                    os.path.join("fm_agent", "bug_validation", f"{bug_id}.md"),
+                    os.path.join("fm_agent", "bug_validation", f"{bug_id}.result.json"),
+                ],
+                summary=f"OpenCode bug validation for {bug_id}",
+                metadata={"bug_id": bug_id, "result_json": result_json_rel},
             )
     finally:
         try:

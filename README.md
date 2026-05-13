@@ -88,6 +88,7 @@ Key parameters can be adjusted in [config.py](config.py).
 | `REASONER_SPEC_CHECK_MODEL`     | `LLM_MODEL`                    | Model used by direct llm calls to check whether actual post-conditions violate specs |
 | `LLM_OPENROUTER_API_KEY`        | (env)                          | OpenRouter API key (read via `os.environ.get("OPENROUTER_API_KEY")`) |
 | `LLM_OPENROUTER_API_BASE_URL`   | `https://openrouter.ai/api/v1` | OpenRouter API base URL                                      |
+| `TRACE_ON`                      | `True`                         | Whether to write FM-Agent's internal trace files under `fm_agent/trace/` |
 
 (Optional) FM-Agent uses oh-my-openagent plugin to enhance OpenCode. The comment-checker hook built into this plugin should be disabled, otherwise it may intercept every comment block that FM-Agent writes, which are specifications of functions. It may force the agent to waste tokens justifying or removing them.
 You can open your oh-my-openagent config file (typically ~/.config/opencode/oh-my-openagent.json) and add disabled_hooks:
@@ -97,6 +98,21 @@ You can open your oh-my-openagent config file (typically ~/.config/opencode/oh-m
   "disabled_hooks": ["comment-checker"],
 }
 ```
+
+### Optional OpenCode Transcript Trace
+
+`TRACE_ON` controls FM-Agent's own trace output under `fm_agent/trace/`; it does not install or remove OpenCode plugins.
+If you also want OpenCode to store its native transcripts, install the OpenCode trace plugin manually by adding it to `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["@ljw1004/opencode-trace"]
+}
+```
+
+After restarting OpenCode, transcripts are stored in `~/opencode-trace`.
+OpenCode may cache the `@latest` package; to force a refresh, remove `~/.cache/opencode/packages/@ljw1004/opencode-trace@latest`.
 
 
 ## Quick Start
