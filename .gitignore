@@ -137,6 +137,9 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+
+# OpenCode plugin transcripts (~/opencode-trace symlinks here)
+opencode-trace/
 .venv
 env/
 venv/

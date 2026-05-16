@@ -1,4 +1,10 @@
-from config import OPENCODE_MAX_RETRIES, OPENCODE_SETUP_MODEL, OPENCODE_SPEC_MODEL
+from config import (
+    OPENCODE_MAX_RETRIES,
+    OPENCODE_SETUP_MODEL,
+    OPENCODE_SPEC_MODEL,
+    OPENCODE_MODEL_PROVIDER,
+    LLM_MODEL,
+)
 from src.file_utils import collect_file_names, is_file_ready
 from src.verification import streaming_reasoner
 from src.extract import run_extraction, EXT_TO_LANG
@@ -151,7 +157,7 @@ def _run_opencode_step(proj_dir, work_dir, script_dir, log_file,
         else:
             prompt = ("Continue where you left off. The previous run was interrupted by a network error. "
                       f"Check what has already been done and only complete the remaining steps. {fm_reminder}")
-        command = ["opencode", "run", "--model", f"openrouter/{model}",
+        command = ["opencode", "run", "--model", f"{OPENCODE_MODEL_PROVIDER}/{model}",
                    "--file", os.path.join(proj_dir, "fm_agent", md_name), "--", prompt]
         try:
             run_opencode_traced(
@@ -241,7 +247,7 @@ def run_pipeline(proj_dir):
         print("[Pipeline] Stage 1/5: AGENTS.md found, skipping opencode init.")
     else:
         print("[Pipeline] Stage 1/5: Initializing opencode...")
-        command = ["opencode", "run", "--command", "init"]
+        command = ["opencode", "run", "--model", f"{OPENCODE_MODEL_PROVIDER}/{LLM_MODEL}", "--command", "init"]
         run_opencode_traced(
             proj_dir=proj_dir,
             work_dir=work_dir,
@@ -282,7 +288,7 @@ def run_pipeline(proj_dir):
         else:
             prompt = ("Continue where you left off. The previous run was interrupted by a network error. "
                       f"Check what has already been done and only complete the remaining steps. {fm_reminder}")
-        command = ["opencode", "run", "--model", f"openrouter/{OPENCODE_SETUP_MODEL}",
+        command = ["opencode", "run", "--model", f"{OPENCODE_MODEL_PROVIDER}/{OPENCODE_SETUP_MODEL}",
                    "--file", os.path.join(proj_dir, "fm_agent", "workflow_setup_extract.md"), "--", prompt]
         try:
             run_opencode_traced(
@@ -469,7 +475,7 @@ def run_pipeline(proj_dir):
                             f"that don't have [SPEC] blocks yet. "
                             f"Read fm_agent/spec_prompts/system_prompt.md for the format rules. {fm_reminder}"
                         )
-                    command = ["opencode", "run", "--model", f"openrouter/{OPENCODE_SPEC_MODEL}",
+                    command = ["opencode", "run", "--model", f"{OPENCODE_MODEL_PROVIDER}/{OPENCODE_SPEC_MODEL}",
                                "--file", os.path.join(proj_dir, "fm_agent", "workflow_spec_step4_batch.md"),
                                "--", prompt]
                     trace_record = start_opencode_traced(

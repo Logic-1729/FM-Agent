@@ -1,4 +1,4 @@
-from config import MAX_WORKERS, OPENCODE_BUG_VALIDATION_MODEL, TRACE_ON
+from config import MAX_WORKERS, OPENCODE_BUG_VALIDATION_MODEL, TRACE_ON, OPENCODE_MODEL_PROVIDER
 from .parser import parse_input_function
 from .reasoner import reasoner, _parse_spec_conditions, _sanitize_strings
 from .file_utils import is_file_ready
@@ -339,7 +339,7 @@ def _validate_single_bug(result_json_rel, proj_dir, work_dir=None):
     os.replace(tmp_path, prompt_path)
 
     log_path = os.path.join(work_dir, "fm_agent.log")
-    command = ["opencode", "run", "--model", f"openrouter/{OPENCODE_BUG_VALIDATION_MODEL}",
+    command = ["opencode", "run", "--model", f"{OPENCODE_MODEL_PROVIDER}/{OPENCODE_BUG_VALIDATION_MODEL}",
                "--file", prompt_path,
                "--", "Follow the instructions in the attached file"]
     result_relpath = os.path.join("fm_agent", "bug_validation", f"{bug_id}.result.json")
