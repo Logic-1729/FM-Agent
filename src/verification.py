@@ -321,7 +321,7 @@ def _validate_single_bug(result_json_rel, proj_dir, work_dir=None):
                 ["opencode", "run", "--model", f"openrouter/{OPENCODE_BUG_VALIDATION_MODEL}",
                  "--file", prompt_path,
                  "--", "Follow the instructions in the attached file"],
-                cwd=proj_dir, check=True,
+                cwd=proj_dir, env={**os.environ, "PWD": os.path.abspath(proj_dir)}, check=True,
                 stdout=log_file, stderr=log_file,
             )
     finally:
