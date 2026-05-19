@@ -73,6 +73,13 @@ def _opencode_env(work_dir, event_id):
     os.makedirs(trace_dir, exist_ok=True)
     env["TRACE_DIR"] = trace_dir
     env["TRACE_FILENAME"] = event_id
+    # subprocess.Popen(cwd=...) chdirs the child but doesn't sync PWD; opencode
+    # walks PWD upward looking for AGENTS.md, so without this it picks up the
+    # fm-agent repo's own AGENTS.md instead of the target's, baking ~10K bytes
+    # of repo docs into every system prompt and invalidating the cache prefix
+    # on every edit.
+    proj_dir = os.path.dirname(os.path.abspath(work_dir))
+    env["PWD"] = proj_dir
     return env
 
 
