@@ -53,6 +53,7 @@ The [website](http://fm-agent.ai/) of FM-Agent provides an online service for re
 - [OpenCode](https://github.com/opencode-ai/opencode) 1.4.6
 - [Bun](https://bun.sh/)
 - [oh-my-openagent](https://www.npmjs.com/package/oh-my-openagent) plugin (installed via `bunx`)
+- [@lucentia/opencode-trace](https://www.npmjs.com/package/@lucentia/opencode-trace) plugin — captures raw OpenCode LLM request/response traces (see [Structured Trace](#structured-trace))
 - [OpenRouter](https://openrouter.ai/) API key
 
 ### Install Dependencies
@@ -63,6 +64,8 @@ Set your [OpenRouter](https://openrouter.ai/) API key as an environment variable
 ```bash
 export OPENROUTER_API_KEY="your-api-key-here"
 ```
+
+See [docs/config_llm.md](docs/config_llm.md) for OpenCode provider configuration and optional prompt-cache setup.
 
 Then, all of the above dependencies (except Ubuntu and Python) can be installed via the provided script:
 

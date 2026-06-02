@@ -53,6 +53,7 @@ FM-Agent 的[官方网站](http://fm-agent.ai/)提供了在线代码库推理服
 - [OpenCode](https://github.com/opencode-ai/opencode) 1.4.6
 - [Bun](https://bun.sh/)
 - [oh-my-openagent](https://www.npmjs.com/package/oh-my-openagent) 插件（通过 `bunx` 安装）
+- [@lucentia/opencode-trace](https://www.npmjs.com/package/@lucentia/opencode-trace) 插件 —— 采集 OpenCode 原始 LLM 请求/响应 trace
 - [OpenRouter](https://openrouter.ai/) API 密钥
 
 ### 安装依赖
@@ -62,6 +63,8 @@ FM-Agent 的[官方网站](http://fm-agent.ai/)提供了在线代码库推理服
 ```bash
 export OPENROUTER_API_KEY="your-api-key-here"
 ```
+
+OpenCode provider 的配置以及可选的 prompt 缓存设置见 [docs/config_llm.md](docs/config_llm.md)。
 
 上述所有依赖（Ubuntu 和 Python 除外）均可通过以下脚本一键安装：
 
