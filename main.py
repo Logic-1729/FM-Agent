@@ -15,8 +15,10 @@ from src.opencode_trace import (
     run_opencode_traced,
     start_opencode_traced,
 )
+from src.incremental_reasoner import run_incremental_pipeline
 import os
 import sys
+import argparse
 import json
 import time
 import shutil
@@ -476,11 +478,32 @@ def run_pipeline(proj_dir):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python3 main.py <proj_dir>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="FM Agent pipeline.")
+    parser.add_argument("proj_dir", help="Path to the project directory.")
+    parser.add_argument(
+        "--incremental",
+        metavar="INTENT_FILE",
+        help="Run in incremental mode. Value is the path to the intent file "
+        "defining the goal of modification.",
+    )
+    parser.add_argument(
+        "--old-commit",
+        metavar="COMMIT",
+        help="The commit id to compare against in incremental mode (required "
+        "with --incremental).",
+    )
+    args = parser.parse_args()
+
+    proj_dir = os.path.abspath(args.proj_dir)
 
     start_time = time.time()
-    run_pipeline(os.path.abspath(sys.argv[1]))
+    if args.incremental:
+        if not args.old_commit:
+            parser.error("--old-commit is required when --incremental is set")
+        run_incremental_pipeline(
+            proj_dir, os.path.abspath(args.incremental), args.old_commit
+        )
+    else:
+        run_pipeline(proj_dir)
     end_time = time.time()
     logging.info(f"Total time: {end_time - start_time:.2f} seconds")
