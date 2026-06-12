@@ -659,6 +659,12 @@ if __name__ == "__main__":
         help="The commit id to compare against in incremental mode (required "
         "with --incremental).",
     )
+    parser.add_argument(
+        "--isolate",
+        action="store_true",
+        help="Run the pipeline against an isolated git worktree snapshot of "
+        "the project instead of the project directory itself.",
+    )
     args = parser.parse_args()
 
     proj_dir = os.path.abspath(args.proj_dir)
@@ -671,10 +677,11 @@ if __name__ == "__main__":
     intent_path = os.path.abspath(args.incremental) if args.incremental else None
 
     start_time = time.time()
-    with frozen_worktree(proj_dir) as snap_dir:
+    run_ctx = frozen_worktree(proj_dir) if args.isolate else contextlib.nullcontext(proj_dir)
+    with run_ctx as run_dir:
         if args.incremental:
-            run_incremental_pipeline(snap_dir, intent_path, args.old_commit)
+            run_incremental_pipeline(run_dir, intent_path, args.old_commit)
         else:
-            run_pipeline(snap_dir)
+            run_pipeline(run_dir)
     end_time = time.time()
     logging.info(f"Total time: {end_time - start_time:.2f} seconds")

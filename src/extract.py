@@ -365,7 +365,16 @@ def _extract_functions_brace(lines, lang_key, lang_cfg):
 
         # Rust: detect fn keyword
         if lang_key == "rust":
-            m = re.match(r'(?:pub\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(\w+)', stripped)
+            m = re.match(
+                r'(?:pub(?:\s*\([^)]*\))?\s+)?'   # pub, pub(crate), pub(super), pub(in ...)
+                r'(?:default\s+)?'
+                r'(?:const\s+)?'
+                r'(?:async\s+)?'
+                r'(?:unsafe\s+)?'
+                r'(?:extern\s+"[^"]*"\s+)?'
+                r'fn\s+(\w+)',
+                stripped,
+            )
             if not m:
                 i += 1
                 continue
