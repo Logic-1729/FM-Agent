@@ -130,9 +130,23 @@ OpenCode may cache the `@latest` package; to force a refresh, remove `~/.cache/o
 python3 main.py <proj_dir>
 ```
 
-| Argument   | Description                                              |
-| ---------- | -------------------------------------------------------- |
-| `proj_dir` | Directory of codebase that you want to check correctness |
+| Argument                  | Description                                                                                     |
+| ------------------------- | ----------------------------------------------------------------------------------------------- |
+| `proj_dir`                | Directory of codebase that you want to check correctness                                        |
+| `--incremental INTENT_FILE` | Run in incremental mode. The value is the path to an intent file describing the goal of the modification. |
+| `--isolate`               | Run against an isolated git worktree snapshot of the project instead of the project directory itself. |
+
+`proj_dir` must be a git repository.
+
+### Incremental Mode
+
+In incremental mode, FM-Agent reuses the results of a previous run and only re-checks what changed. It diffs the current code against the commit recorded by the previous run in `fm_agent/version.log`. Each run records the processed commit id to that file, so a subsequent `--incremental` run automatically picks it up:
+
+```bash
+python3 main.py <proj_dir> --incremental <intent_file>
+```
+
+If `fm_agent/version.log` does not exist (no previous run to compare against), FM-Agent falls back to a full run.
 
 ### Output
 

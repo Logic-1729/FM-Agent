@@ -137,6 +137,36 @@ def _clean_previous_run(work_dir):
         shutil.rmtree(work_dir)
 
 
+def _is_git_repo(proj_dir):
+    """Return whether proj_dir is a git repository with at least one commit."""
+    try:
+        subprocess.run(
+            ["git", "-C", proj_dir, "rev-parse", "--verify", "HEAD"],
+            check=True, capture_output=True, text=True,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
+def _record_version(proj_dir, work_dir):
+    """Record the latest git commit id of proj_dir into fm_agent/version.log.
+
+    Writes nothing when proj_dir is not a git repository with a commit.
+    """
+    try:
+        commit_id = subprocess.run(
+            ["git", "-C", proj_dir, "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError:
+        logging.info("_record_version: %s is not a git repo; skipping version.log.", proj_dir)
+        return
+    version_path = os.path.join(work_dir, "version.log")
+    with open(version_path, "w") as f:
+        f.write(commit_id)
+
+
 def _get_pending_batches(batches, proj_dir):
     """Return batches that still have at least one function without specs."""
     pending = []
@@ -310,7 +340,7 @@ def _run_opencode_init(proj_dir, work_dir):
         )
 
 @contextlib.contextmanager
-def frozen_worktree(proj_dir, exclude=("fm_agent",)):
+def frozen_worktree(proj_dir, exclude=("fm_agent",), copy_excluded=True):
     """Freeze proj_dir's current working tree into an isolated git worktree.
 
     Captures committed state PLUS uncommitted edits and untracked files, so the
@@ -324,11 +354,12 @@ def frozen_worktree(proj_dir, exclude=("fm_agent",)):
     is left in place after the run (including its fm_agent/ outputs); its path is
     logged so it can be inspected or cleaned up manually.
 
-    The `exclude` dirs (the pipeline's own workspace) are kept out of the git
-    snapshot commit so it stays clean, but are then copied into the worktree as-is.
-    Incremental mode needs the previous run's fm_agent/ results to detect a prior
-    full run, and those results are typically gitignored, hence absent from the
-    snapshot commit.
+    The `exclude` dirs (the FM-Agent's own workspace) are always kept out of the
+    git snapshot commit so it stays clean. When `copy_excluded` is set, they are
+    then copied into the worktree as-is. Incremental mode needs the previous run's
+    fm_agent/ results to detect a prior full run, and those results are typically
+    gitignored, hence absent from the snapshot commit. A full run discards any
+    prior fm_agent/, so it passes copy_excluded=False to skip the copy.
     """
     proj_dir = os.path.abspath(proj_dir)
     # Include the repo name in the temp dir so concurrent runs across different
@@ -378,11 +409,12 @@ def frozen_worktree(proj_dir, exclude=("fm_agent",)):
     # phases.json and extracted_functions) into the snapshot. They were kept out
     # of the git commit, but incremental mode reads them from disk to compare
     # against, so the snapshot must physically contain them.
-    for name in exclude:
-        src = os.path.join(proj_dir, name)
-        dst = os.path.join(wt, name)
-        if os.path.isdir(src) and not os.path.exists(dst):
-            shutil.copytree(src, dst, symlinks=True)
+    if copy_excluded:
+        for name in exclude:
+            src = os.path.join(proj_dir, name)
+            dst = os.path.join(wt, name)
+            if os.path.isdir(src) and not os.path.exists(dst):
+                shutil.copytree(src, dst, symlinks=True)
 
     print(f"[Pipeline] Snapshot created at: {wt}")
     print(f"[Pipeline] Snapshot is kept after the run. "
@@ -654,12 +686,6 @@ if __name__ == "__main__":
         "defining the goal of modification.",
     )
     parser.add_argument(
-        "--old-commit",
-        metavar="COMMIT",
-        help="The commit id to compare against in incremental mode (required "
-        "with --incremental).",
-    )
-    parser.add_argument(
         "--isolate",
         action="store_true",
         help="Run the pipeline against an isolated git worktree snapshot of "
@@ -669,19 +695,54 @@ if __name__ == "__main__":
 
     proj_dir = os.path.abspath(args.proj_dir)
 
-    if args.incremental and not args.old_commit:
-        parser.error("--old-commit is required when --incremental is set")
+    # Incremental mode diffs against the commit recorded by a previous run, and
+    # --isolate snapshots the repo via a git worktree, so both require a git repo.
+    # A non-git project can only run the full pipeline against the project directory
+    # itself.
+    if not _is_git_repo(proj_dir):
+        parser.error(
+            f"FM-Agent requires a git repository, but {proj_dir} is not."
+        )
 
     # Resolve the intent path before snapshotting, since cwd-relative paths must
     # resolve against the real project, not the frozen worktree copy.
     intent_path = os.path.abspath(args.incremental) if args.incremental else None
 
+    # In incremental mode the commit to diff against is read from the version.log
+    # recorded by a previous run. Read it from the real project before snapshotting.
+    old_commit = None
+    if args.incremental:
+        version_path = os.path.join(proj_dir, "fm_agent", "version.log")
+        if os.path.exists(version_path):
+            with open(version_path, "r") as f:
+                old_commit = f.read().strip()
+
     start_time = time.time()
-    run_ctx = frozen_worktree(proj_dir) if args.isolate else contextlib.nullcontext(proj_dir)
+    run_ctx = (
+        frozen_worktree(proj_dir, copy_excluded=bool(args.incremental))
+        if args.isolate
+        else contextlib.nullcontext(proj_dir)
+    )
     with run_ctx as run_dir:
-        if args.incremental:
-            run_incremental_pipeline(run_dir, intent_path, args.old_commit)
+        # Incremental mode requires a recorded commit to diff against; without a
+        # version.log from a previous run, fall back to the full pipeline.
+        if args.incremental and old_commit:
+            run_incremental_pipeline(run_dir, intent_path, old_commit)
         else:
             run_pipeline(run_dir)
+        # Record the git commit id of the project that was processed
+        _record_version(run_dir, os.path.join(run_dir, "fm_agent"))
+
+        # With --isolate the pipeline ran against a throwaway snapshot, so its
+        # fm_agent/ results live in the snapshot. Copy them back into the real
+        # project so they are not lost when the snapshot is discarded.
+        if args.isolate:
+            src_fm = os.path.join(run_dir, "fm_agent")
+            dst_fm = os.path.join(proj_dir, "fm_agent")
+            if os.path.isdir(src_fm):
+                if os.path.isdir(dst_fm):
+                    shutil.rmtree(dst_fm)
+                shutil.copytree(src_fm, dst_fm, symlinks=True)
+                print(f"[Pipeline] Copied results back to {dst_fm}")
     end_time = time.time()
     logging.info(f"Total time: {end_time - start_time:.2f} seconds")
