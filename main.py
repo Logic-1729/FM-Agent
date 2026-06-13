@@ -149,22 +149,26 @@ def _is_git_repo(proj_dir):
         return False
 
 
-def _record_version(proj_dir, work_dir):
-    """Record the latest git commit id of proj_dir into fm_agent/version.log.
-
-    Writes nothing when proj_dir is not a git repository with a commit.
-    """
+def _get_head_commit(proj_dir):
+    """Return the latest git commit id of proj_dir, or None if not a git repo."""
     try:
-        commit_id = subprocess.run(
+        return subprocess.run(
             ["git", "-C", proj_dir, "rev-parse", "HEAD"],
             check=True, capture_output=True, text=True,
         ).stdout.strip()
     except subprocess.CalledProcessError:
-        logging.info("_record_version: %s is not a git repo; skipping version.log.", proj_dir)
+        logging.info("_get_head_commit: %s is not a git repo.", proj_dir)
+        return None
+
+
+def _record_version(commit_id, work_dir):
+    """Append commit_id as a new line to fm_agent/version.log, building up a
+    history of processed commits. No-op when commit_id is falsy."""
+    if not commit_id:
         return
     version_path = os.path.join(work_dir, "version.log")
-    with open(version_path, "w") as f:
-        f.write(commit_id)
+    with open(version_path, "a") as f:
+        f.write(commit_id + "\n")
 
 
 def _get_pending_batches(batches, proj_dir):
@@ -708,14 +712,21 @@ if __name__ == "__main__":
     # resolve against the real project, not the frozen worktree copy.
     intent_path = os.path.abspath(args.incremental) if args.incremental else None
 
-    # In incremental mode the commit to diff against is read from the version.log
-    # recorded by a previous run. Read it from the real project before snapshotting.
+    # In incremental mode the commit to diff against is the most recent one recorded
+    # in version.log (the last line, since each run appends its commit). Read it from
+    # the real project before snapshotting.
     old_commit = None
     if args.incremental:
         version_path = os.path.join(proj_dir, "fm_agent", "version.log")
         if os.path.exists(version_path):
             with open(version_path, "r") as f:
-                old_commit = f.read().strip()
+                commits = [line.strip() for line in f if line.strip()]
+            old_commit = commits[-1] if commits else None
+
+    # Capture the project's latest commit id before running. With --isolate the
+    # pipeline runs against a throwaway worktree snapshot whose HEAD is a synthetic
+    # snapshot commit, so the version to record must come from the real project.
+    new_commit = _get_head_commit(proj_dir)
 
     start_time = time.time()
     run_ctx = (
@@ -730,8 +741,10 @@ if __name__ == "__main__":
             run_incremental_pipeline(run_dir, intent_path, old_commit)
         else:
             run_pipeline(run_dir)
-        # Record the git commit id of the project that was processed
-        _record_version(run_dir, os.path.join(run_dir, "fm_agent"))
+        # Record the commit that was processed. Written after the pipeline since it
+        # recreates fm_agent/; with --isolate it lives in the snapshot and is copied
+        # back to the real project below.
+        _record_version(new_commit, os.path.join(run_dir, "fm_agent"))
 
         # With --isolate the pipeline ran against a throwaway snapshot, so its
         # fm_agent/ results live in the snapshot. Copy them back into the real
