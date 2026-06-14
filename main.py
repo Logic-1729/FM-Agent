@@ -8,7 +8,7 @@ from config import (
 from src.entry_reasoning_pipeline import run_entry_pipeline
 from src.file_utils import collect_file_names, is_file_ready
 from src.verification import streaming_reasoner
-from src.extract import run_extraction, EXT_TO_LANG
+from src.extract import run_extraction, EXT_TO_LANG, _is_test_file
 from src.generate_topdown_layers import generate_topdown_layers
 from src.opencode_trace import (
     finish_opencode_trace,
@@ -16,14 +16,31 @@ from src.opencode_trace import (
     run_opencode_traced,
     start_opencode_traced,
 )
+from src.incremental_reasoner import run_incremental_pipeline
 import os
 import sys
+import argparse
 import json
 import time
 import shutil
 import subprocess
 import logging
-import argparse
+import tempfile
+import contextlib
+
+def _merge_descriptions(target_desc, source_desc):
+    """Append a removed module's description to the owning module's description.
+
+    Avoids re-merging the same content if it is already present.
+    """
+    source_desc = (source_desc or "").strip()
+    if not source_desc:
+        return target_desc
+    if source_desc in target_desc:
+        return target_desc
+    if not target_desc:
+        return source_desc
+    return f"{target_desc}\n\n{source_desc}"
 
 def _deduplicate_phases(phases_dir):
     """Ensure each source file appears in at most one phase; keep the earliest."""
@@ -32,14 +49,18 @@ def _deduplicate_phases(phases_dir):
         data = json.load(f)
 
     seen = set()
+    # Maps each kept source file to the module that first claimed (owns) it.
+    file_owner = {}
     phases_to_remove = []
     for phase in sorted(data["phases"], key=lambda p: p["phase"]):
+        modules_to_remove = []
         for module in phase["modules"]:
             original = module["source_files"]
             deduped = []
             for sf in original:
                 if sf not in seen:
                     seen.add(sf)
+                    file_owner[sf] = module
                     deduped.append(sf)
                 else:
                     logging.info(
@@ -47,6 +68,27 @@ def _deduplicate_phases(phases_dir):
                         sf, phase["phase"], module["name"],
                     )
             module["source_files"] = deduped
+            if not deduped:
+                # Module lost all its files to deduplication. Merge its description
+                # into the owning modules that now hold those same files, then drop it.
+                owners = []
+                for sf in original:
+                    owner = file_owner.get(sf)
+                    if owner is not None and owner is not module and owner not in owners:
+                        owners.append(owner)
+                for owner in owners:
+                    owner["description"] = _merge_descriptions(
+                        owner.get("description", ""),
+                        module.get("description", ""),
+                    )
+                logging.info(
+                    "Removing empty module '%s' from phase %d; merged its description into %d module(s): %s",
+                    module.get("name", ""), phase["phase"], len(owners),
+                    ", ".join(o.get("name", "") for o in owners),
+                )
+                modules_to_remove.append(module)
+        for module in modules_to_remove:
+            phase["modules"].remove(module)
         total_files = sum(len(m["source_files"]) for m in phase["modules"])
         if total_files == 0:
             logging.info("Removing phase %d: no source files remain after deduplication", phase["phase"])
@@ -94,6 +136,40 @@ def _clean_previous_run(work_dir):
     """Remove the fm_agent working directory from the previous pipeline run."""
     if os.path.isdir(work_dir):
         shutil.rmtree(work_dir)
+
+
+def _is_git_repo(proj_dir):
+    """Return whether proj_dir is a git repository with at least one commit."""
+    try:
+        subprocess.run(
+            ["git", "-C", proj_dir, "rev-parse", "--verify", "HEAD"],
+            check=True, capture_output=True, text=True,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
+def _get_head_commit(proj_dir):
+    """Return the latest git commit id of proj_dir, or None if not a git repo."""
+    try:
+        return subprocess.run(
+            ["git", "-C", proj_dir, "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError:
+        logging.info("_get_head_commit: %s is not a git repo.", proj_dir)
+        return None
+
+
+def _record_version(commit_id, work_dir):
+    """Append commit_id as a new line to fm_agent/version.log, building up a
+    history of processed commits. No-op when commit_id is falsy."""
+    if not commit_id:
+        return
+    version_path = os.path.join(work_dir, "version.log")
+    with open(version_path, "a") as f:
+        f.write(commit_id + "\n")
 
 
 def _get_pending_batches(batches, proj_dir):
@@ -195,57 +271,52 @@ def _has_source_code(proj_dir):
     return False
 
 
-def run_pipeline(proj_dir, resume=False):
-    if not os.path.isdir(proj_dir):
-        print(f"[Pipeline] ERROR: proj_dir does not exist or is not a directory: {proj_dir}")
-        sys.exit(1)
+def _collect_project_source_files(proj_dir):
+    """Return non-test source files currently present in proj_dir, relative to proj_dir."""
+    source_exts = set(EXT_TO_LANG.keys())
+    files = set()
+    for root, dirs, names in os.walk(proj_dir):
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in
+                   {'node_modules', '__pycache__', 'venv', '.venv', 'fm_agent'}]
+        for fname in names:
+            ext = fname.rsplit('.', 1)[-1] if '.' in fname else ''
+            if ext not in source_exts:
+                continue
+            rel = os.path.relpath(os.path.join(root, fname), proj_dir).replace(os.sep, '/')
+            if not _is_test_file(rel):
+                files.add(rel)
+    return files
 
-    if not _has_source_code(proj_dir):
-        print(f"[Pipeline] ERROR: No source code files found in {proj_dir}. "
-              f"Supported extensions: {', '.join(sorted(EXT_TO_LANG.keys()))}")
-        sys.exit(1)
 
-    work_dir = os.path.join(proj_dir, "fm_agent")
-    input_dir = os.path.join(work_dir, "extracted_functions")
-    output_dir = os.path.join(work_dir, "logic_verification_results")
+def _phases_cover_current_sources(phases_json, proj_dir):
+    """Return whether phases.json is valid for the current source-file set."""
+    try:
+        with open(phases_json, "r") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
 
-    # Clean files from the previous run — unless resuming, where we keep all
-    # prior progress (phases.json, generated specs, verification results) and
-    # only do the remaining work.
-    if resume:
-        if os.path.isdir(work_dir):
-            print(f"[Pipeline] RESUME: keeping existing {os.path.relpath(work_dir, proj_dir)}/ — only remaining work will run.")
-        else:
-            print("[Pipeline] RESUME requested but no previous fm_agent/ found — starting fresh.")
-            resume = False
-    else:
-        _clean_previous_run(work_dir)
-    os.makedirs(work_dir, exist_ok=True)
+    listed = set()
+    for phase in data.get("phases", []):
+        for module in phase.get("modules", []):
+            for source_file in module.get("source_files", []):
+                listed.add(source_file.replace("\\", "/"))
 
-    # Initialize opencode in the project directory (skip if AGENTS.md already exists)
-    agent_md = os.path.join(proj_dir, "AGENTS.md")
-    if os.path.exists(agent_md):
-        print("[Pipeline] Stage 1/5: AGENTS.md found, skipping opencode init.")
-    else:
-        print("[Pipeline] Stage 1/5: Initializing opencode...")
-        command = ["opencode", "run", "--model", f"{OPENCODE_MODEL_PROVIDER}/{LLM_MODEL}", "--command", "init"]
-        run_opencode_traced(
-            proj_dir=proj_dir,
-            work_dir=work_dir,
-            command=command,
-            stage="init",
-            output_files=["AGENTS.md"],
-            summary="Initialized OpenCode project context",
-        )
+    if not listed:
+        return False
+    if any(not os.path.exists(os.path.join(proj_dir, sf)) for sf in listed):
+        return False
+    return _collect_project_source_files(proj_dir).issubset(listed)
 
-    # Copy workflow_setup_extract.md to proj_dir and run opencode against it
-    print("[Pipeline] Stage 2/5: Understanding codebase and extracting functions ...")
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+def _run_setup_extract(proj_dir, work_dir, script_dir, is_incremental=False, resume=False):
+    """Stage 2: prepare the setup workflow file and run opencode (with retries) to produce phases.json."""
     # On resume, reuse the existing phase plan instead of paying for the
     # setup_context LLM call again.
     _resume_skip_setup = resume and _setup_outputs_complete(work_dir)
     if _resume_skip_setup:
         print("[Pipeline] Stage 2/5: RESUME — all setup outputs found, skipping setup_context (reusing phase plan).")
+
     workflow_src = os.path.join(script_dir, "md", "workflow_setup_extract.md")
     workflow_dst = os.path.join(work_dir, "workflow_setup_extract.md")
     shutil.copy2(workflow_src, workflow_dst)
@@ -266,6 +337,16 @@ def run_pipeline(proj_dir, resume=False):
                     "It is a workspace for storing your output files only. "
                     "Do NOT include fm_agent/ paths in phases.json. "
                     "Do NOT modify any existing project files.")
+    incremental_reminder = ("IMPORTANT: An existing fm_agent/phases.json from a previous run is already "
+                            "present. Do NOT regenerate it from scratch. Instead, inspect the current "
+                            "state of the source code and UPDATE the existing fm_agent/phases.json so it "
+                            "reflects the current version of the code: add modules and source files that "
+                            "are new, remove entries whose files no longer exist, and adjust phases as "
+                            "needed. Preserve entries that are still accurate.")
+
+    phases_json = os.path.join(work_dir, "phases.json")
+    prev_mtime = os.path.getmtime(phases_json) if os.path.exists(phases_json) else None
+
     for attempt in range(1, OPENCODE_MAX_RETRIES + 1):
         if _resume_skip_setup:
             break
@@ -283,6 +364,8 @@ def run_pipeline(proj_dir, resume=False):
                       "spec_prompts/domain_context/ files). Keep any existing valid output as-is and only "
                       "generate the files that are missing or incomplete — do NOT regenerate or overwrite "
                       f"work that is already done. {fm_reminder}")
+        if is_incremental:
+            prompt = f"{prompt} {incremental_reminder}"
         command = ["opencode", "run", "--model", f"{OPENCODE_MODEL_PROVIDER}/{OPENCODE_SETUP_MODEL}",
                    "--file", os.path.join(proj_dir, "fm_agent", "workflow_setup_extract.md"), "--", prompt]
         try:
@@ -302,29 +385,174 @@ def run_pipeline(proj_dir, resume=False):
         except subprocess.CalledProcessError as e:
             logging.warning(f"Stage 2 attempt {attempt}: opencode exited with code {e.returncode}")
 
-        # Validate that the agent produced phases.json
-        phases_json = os.path.join(work_dir, "phases.json")
+        # Validate that the agent produced phases.json. In incremental mode the file
+        # already exists; it may legitimately remain byte-for-byte unchanged for same-file
+        # edits, so accept it when it still covers the current source files.
         if os.path.exists(phases_json):
-            break
+            if (
+                not is_incremental
+                or os.path.getmtime(phases_json) != prev_mtime
+                or _phases_cover_current_sources(phases_json, proj_dir)
+            ):
+                break
 
+        failure = "update phases.json" if is_incremental else "produce phases.json"
+        missing = "phases.json was not updated" if is_incremental else "phases.json missing"
         if attempt < OPENCODE_MAX_RETRIES:
             delay = 10
             print(
-                f"[Pipeline] Stage 2 failed to produce phases.json (attempt {attempt}/{OPENCODE_MAX_RETRIES}). "
+                f"[Pipeline] Stage 2 failed to {failure} (attempt {attempt}/{OPENCODE_MAX_RETRIES}). "
                 f"Retrying in {delay}s..."
             )
-            logging.warning(f"Stage 2 attempt {attempt} failed: phases.json missing. Retrying in {delay}s.")
+            logging.warning(f"Stage 2 attempt {attempt} failed: {missing}. Retrying in {delay}s.")
             time.sleep(delay)
         else:
             print(
                 f"[Pipeline] ERROR: Stage 2 failed after {OPENCODE_MAX_RETRIES} attempts. "
-                f"phases.json is missing. "
+                f"{missing}. "
                 f"Check {os.path.basename(proj_dir)}/fm_agent/trace/ for details."
             )
             sys.exit(1)
 
     # Deduplicate source files across phases
     _deduplicate_phases(work_dir)
+
+
+def _run_opencode_init(proj_dir, work_dir):
+    agent_md = os.path.join(proj_dir, "AGENTS.md")
+    if os.path.exists(agent_md):
+        print("[Pipeline] Stage 1/5: AGENTS.md found, skipping opencode init.")
+    else:
+        print("[Pipeline] Stage 1/5: Initializing opencode...")
+        command = ["opencode", "run", "--model", f"{OPENCODE_MODEL_PROVIDER}/{LLM_MODEL}", "--command", "init"]
+        run_opencode_traced(
+            proj_dir=proj_dir,
+            work_dir=work_dir,
+            command=command,
+            stage="init",
+            output_files=["AGENTS.md"],
+            summary="Initialized OpenCode project context",
+        )
+
+@contextlib.contextmanager
+def frozen_worktree(proj_dir, exclude=("fm_agent",), copy_excluded=True):
+    """Freeze proj_dir's current working tree into an isolated git worktree.
+
+    Captures committed state PLUS uncommitted edits and untracked files, so the
+    yielded copy is a faithful snapshot of proj_dir at entry time. Concurrent
+    edits to proj_dir afterwards do not affect the snapshot, letting the pipeline
+    run against a stable copy.
+
+    The snapshot is built through a private index (GIT_INDEX_FILE), so proj_dir's
+    real index and working tree are never touched. Falls back to a plain directory
+    copy when proj_dir is not a git repository with a commit. The snapshot folder
+    is left in place after the run (including its fm_agent/ outputs); its path is
+    logged so it can be inspected or cleaned up manually.
+
+    The `exclude` dirs (the FM-Agent's own workspace) are always kept out of the
+    git snapshot commit so it stays clean. When `copy_excluded` is set, they are
+    then copied into the worktree as-is. Incremental mode needs the previous run's
+    fm_agent/ results to detect a prior full run, and those results are typically
+    gitignored, hence absent from the snapshot commit. A full run discards any
+    prior fm_agent/, so it passes copy_excluded=False to skip the copy.
+    """
+    proj_dir = os.path.abspath(proj_dir)
+    # Include the repo name in the temp dir so concurrent runs across different
+    # repos are distinguishable (e.g. /tmp/fm_agent_wt_myrepo_a3k9d2/snapshot).
+    repo_name = os.path.basename(proj_dir.rstrip(os.sep)) or "repo"
+    base = tempfile.mkdtemp(prefix=f"fm_agent_wt_{repo_name}_")
+    wt = os.path.join(base, "snapshot")
+
+    def _git(*args, **kwargs):
+        return subprocess.run(
+            ["git", "-C", proj_dir, *args],
+            check=True, capture_output=True, text=True, **kwargs,
+        ).stdout.strip()
+
+    is_git = False
+    try:
+        _git("rev-parse", "--verify", "HEAD")
+        is_git = True
+    except subprocess.CalledProcessError:
+        pass
+
+    if is_git:
+        env = dict(os.environ, GIT_INDEX_FILE=os.path.join(base, "index"))
+        _git("read-tree", "HEAD", env=env)
+        # Stage the full working tree (tracked edits + untracked files). Using a
+        # bare `git add -A` lets git silently skip gitignored paths; passing the
+        # workspace dirs as :(exclude) pathspecs instead errors out when a repo
+        # already gitignores them ("paths are ignored ... use -f"). Drop the
+        # workspace dirs from the private index afterwards to cover repos that do
+        # NOT gitignore them.
+        _git("add", "-A", env=env)
+        if exclude:
+            _git("rm", "-r", "--cached", "--quiet", "--ignore-unmatch", "--",
+                 *exclude, env=env)
+        tree = _git("write-tree", env=env)
+        snap = _git("commit-tree", tree, "-p", "HEAD", "-m", "fm_agent snapshot")
+        _git("worktree", "add", "--detach", wt, snap)
+    else:
+        logging.info("frozen_worktree: %s is not a git repo; copying instead.", proj_dir)
+        shutil.copytree(
+            proj_dir, wt,
+            ignore=shutil.ignore_patterns(*exclude),
+            symlinks=True,
+        )
+
+    # Copy the excluded workspace dirs (e.g. fm_agent/ with a prior full run's
+    # phases.json and extracted_functions) into the snapshot. They were kept out
+    # of the git commit, but incremental mode reads them from disk to compare
+    # against, so the snapshot must physically contain them.
+    if copy_excluded:
+        for name in exclude:
+            src = os.path.join(proj_dir, name)
+            dst = os.path.join(wt, name)
+            if os.path.isdir(src) and not os.path.exists(dst):
+                shutil.copytree(src, dst, symlinks=True)
+
+    print(f"[Pipeline] Snapshot created at: {wt}")
+    print(f"[Pipeline] Snapshot is kept after the run. "
+          f"Remove with: git -C {proj_dir} worktree remove --force {wt}"
+          if is_git else
+          f"[Pipeline] Snapshot is kept after the run. Remove with: rm -rf {wt}")
+    yield wt
+
+
+def run_pipeline(proj_dir, resume=False):
+    if not os.path.isdir(proj_dir):
+        print(f"[Pipeline] ERROR: proj_dir does not exist or is not a directory: {proj_dir}")
+        sys.exit(1)
+
+    if not _has_source_code(proj_dir):
+        print(f"[Pipeline] ERROR: No source code files found in {proj_dir}. "
+              f"Supported extensions: {', '.join(sorted(EXT_TO_LANG.keys()))}")
+        sys.exit(1)
+
+    work_dir = os.path.join(proj_dir, "fm_agent")
+    input_dir = os.path.join(work_dir, "extracted_functions")
+    output_dir = os.path.join(work_dir, "logic_verification_results")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Clean files from the previous run — unless resuming, where we keep all
+    # prior progress (phases.json, generated specs, verification results) and
+    # only do the remaining work.
+    if resume:
+        if os.path.isdir(work_dir):
+            print(f"[Pipeline] RESUME: keeping existing {os.path.relpath(work_dir, proj_dir)}/ — only remaining work will run.")
+        else:
+            print("[Pipeline] RESUME requested but no previous fm_agent/ found — starting fresh.")
+            resume = False
+    else:
+        _clean_previous_run(work_dir)
+    os.makedirs(work_dir, exist_ok=True)
+
+    # Initialize opencode in the project directory (skip if AGENTS.md already exists)
+    _run_opencode_init(proj_dir, work_dir)
+
+    # Copy workflow_setup_extract.md to proj_dir and run opencode against it
+    print("[Pipeline] Stage 2/5: Understanding codebase and extracting functions ...")
+    _run_setup_extract(proj_dir, work_dir, script_dir, resume=resume)
 
     # Run function extraction using extract.py
     # force=False on resume preserves already-specced extracted files; on a fresh
@@ -581,7 +809,8 @@ def run_pipeline(proj_dir, resume=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        usage="python3 main.py <proj_dir> [--resume] [--entry-func PATH] [--end-func PATH ...]",
+        usage="python3 main.py <proj_dir> [--resume] [--incremental INTENT_FILE] "
+              "[--isolate] [--entry-func PATH] [--end-func PATH ...]",
         description="Run the FM agent pipeline on a project directory.",
     )
     parser.add_argument("proj_dir", help="path to the project directory")
@@ -591,6 +820,18 @@ if __name__ == "__main__":
         help="continue a previous run in <proj_dir>/fm_agent instead of wiping it: "
         "keeps phases.json, generated specs, and existing verification results; "
         "only does the remaining work.",
+    )
+    parser.add_argument(
+        "--incremental",
+        metavar="INTENT_FILE",
+        help="Run in incremental mode. Value is the path to the intent file "
+        "defining the goal of modification.",
+    )
+    parser.add_argument(
+        "--isolate",
+        action="store_true",
+        help="Run the pipeline against an isolated git worktree snapshot of "
+        "the project instead of the project directory itself.",
     )
     parser.add_argument(
         "--entry-func",
@@ -606,20 +847,83 @@ if __name__ == "__main__":
         help="one or more function paths at which to stop (space-separated list); "
         "if omitted, the whole call graph reachable from --entry-func is analyzed.",
     )
-    parsed = parser.parse_args()
-    resume = parsed.resume or os.environ.get("FM_AGENT_RESUME") == "1"
-    entry_func = parsed.entry_func
-    end_funcs = parsed.end_func
+    args = parser.parse_args()
+
+    resume = args.resume or os.environ.get("FM_AGENT_RESUME") == "1"
+    proj_dir = os.path.abspath(args.proj_dir)
 
     start_time = time.time()
-    if entry_func is not None:
+
+    # Entry-point mode: reason only about the call graph reachable from a specific
+    # entry function. Runs directly against the project directory (no worktree
+    # isolation or incremental diffing).
+    if args.entry_func is not None:
         run_entry_pipeline(
-            os.path.abspath(parsed.proj_dir),
-            entry_func=entry_func,
-            end_funcs=end_funcs,
+            proj_dir,
+            entry_func=args.entry_func,
+            end_funcs=args.end_func,
             resume=resume,
         )
-    else:
-        run_pipeline(os.path.abspath(parsed.proj_dir), resume=resume)
+        end_time = time.time()
+        logging.info(f"Total time: {end_time - start_time:.2f} seconds")
+        sys.exit(0)
+
+    # Incremental mode diffs against the commit recorded by a previous run, and
+    # --isolate snapshots the repo via a git worktree, so both require a git repo.
+    # A non-git project can only run the full pipeline against the project directory
+    # itself.
+    if not _is_git_repo(proj_dir):
+        parser.error(
+            f"FM-Agent requires a git repository, but {proj_dir} is not."
+        )
+
+    # Resolve the intent path before snapshotting, since cwd-relative paths must
+    # resolve against the real project, not the frozen worktree copy.
+    intent_path = os.path.abspath(args.incremental) if args.incremental else None
+
+    # In incremental mode the commit to diff against is the most recent one recorded
+    # in version.log (the last line, since each run appends its commit). Read it from
+    # the real project before snapshotting.
+    old_commit = None
+    if args.incremental:
+        version_path = os.path.join(proj_dir, "fm_agent", "version.log")
+        if os.path.exists(version_path):
+            with open(version_path, "r") as f:
+                commits = [line.strip() for line in f if line.strip()]
+            old_commit = commits[-1] if commits else None
+
+    # Capture the project's latest commit id before running. With --isolate the
+    # pipeline runs against a throwaway worktree snapshot whose HEAD is a synthetic
+    # snapshot commit, so the version to record must come from the real project.
+    new_commit = _get_head_commit(proj_dir)
+
+    run_ctx = (
+        frozen_worktree(proj_dir, copy_excluded=bool(args.incremental))
+        if args.isolate
+        else contextlib.nullcontext(proj_dir)
+    )
+    with run_ctx as run_dir:
+        # Incremental mode requires a recorded commit to diff against; without a
+        # version.log from a previous run, fall back to the full pipeline.
+        if args.incremental and old_commit:
+            run_incremental_pipeline(run_dir, intent_path, old_commit)
+        else:
+            run_pipeline(run_dir, resume=resume)
+        # Record the commit that was processed. Written after the pipeline since it
+        # recreates fm_agent/; with --isolate it lives in the snapshot and is copied
+        # back to the real project below.
+        _record_version(new_commit, os.path.join(run_dir, "fm_agent"))
+
+        # With --isolate the pipeline ran against a throwaway snapshot, so its
+        # fm_agent/ results live in the snapshot. Copy them back into the real
+        # project so they are not lost when the snapshot is discarded.
+        if args.isolate:
+            src_fm = os.path.join(run_dir, "fm_agent")
+            dst_fm = os.path.join(proj_dir, "fm_agent")
+            if os.path.isdir(src_fm):
+                if os.path.isdir(dst_fm):
+                    shutil.rmtree(dst_fm)
+                shutil.copytree(src_fm, dst_fm, symlinks=True)
+                print(f"[Pipeline] Copied results back to {dst_fm}")
     end_time = time.time()
     logging.info(f"Total time: {end_time - start_time:.2f} seconds")

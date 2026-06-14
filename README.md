@@ -150,12 +150,26 @@ OpenCode may cache the `@latest` package; to force a refresh, remove `~/.cache/o
 uv run python main.py <proj_dir> [--resume]
 ```
 
-| Argument   | Description                                              |
-| ---------- | -------------------------------------------------------- |
-| `proj_dir` | Directory of codebase that you want to check correctness |
-| `--resume` | Continue a previous, interrupted run instead of starting over |
+| Argument                    | Description                                                                                     |
+| --------------------------- | ----------------------------------------------------------------------------------------------- |
+| `proj_dir`                  | Directory of codebase that you want to check correctness                                        |
+| `--resume`                  | Continue a previous, interrupted run instead of starting over                                   |
+| `--incremental INTENT_FILE` | Run in incremental mode. The value is the path to an intent file describing the goal of the modification. |
+| `--isolate`                 | Run against an isolated git worktree snapshot of the project instead of the project directory itself. |
+
+`proj_dir` must be a git repository.
 
 By default, every invocation wipes the existing `fm_agent/` directory and restarts from scratch, so an interrupted run loses all prior progress. Pass `--resume` (or set the environment variable `FM_AGENT_RESUME=1`) to continue where the previous run left off. In resume mode FM-Agent keeps the existing `fm_agent/` directory and only does the remaining work.
+
+### Incremental Mode
+
+In incremental mode, FM-Agent reuses the results of a previous run and only re-checks what changed. It diffs the current code against the commit recorded by the previous run in `fm_agent/version.log`. Each run records the processed commit id to that file, so a subsequent `--incremental` run automatically picks it up:
+
+```bash
+python3 main.py <proj_dir> --incremental <intent_file>
+```
+
+If `fm_agent/version.log` does not exist (no previous run to compare against), FM-Agent falls back to a full run.
 
 ### Live Dashboard
 

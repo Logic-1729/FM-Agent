@@ -134,8 +134,22 @@ uv run python main.py <proj_dir> [--resume]
 |---|---|
 | `proj_dir` | 待检测代码库的目录路径 |
 | `--resume` | 续跑上一次中断的运行，而非从头开始 |
+| `--incremental INTENT_FILE` | 以增量模式运行，参数值为描述本次修改目标的意图文件路径。 |
+| `--isolate` | 针对项目的隔离 git worktree 快照运行，而非直接在项目目录上运行。 |
+
+`proj_dir` 必须是一个 git 仓库。
 
 默认情况下，每次运行都会清空已有的 `fm_agent/` 目录并从头开始，因此一旦运行中断，之前的所有进度都会丢失。可通过 `--resume` 参数（或设置环境变量 `FM_AGENT_RESUME=1`）从上一次中断处继续。在续跑模式下，FM-Agent 会保留已有的 `fm_agent/` 目录，只执行剩余的工作。
+
+### 增量模式
+
+增量模式会复用上一次运行的结果，仅重新检测发生变化的部分。它将当前代码与上一次运行记录在 `fm_agent/version.log` 中的提交进行 diff。每次运行都会把所处理的提交 id 写入该文件，因此后续的 `--incremental` 运行会自动读取它：
+
+```bash
+python3 main.py <proj_dir> --incremental <intent_file>
+```
+
+如果 `fm_agent/version.log` 不存在（没有可供比较的历史运行），FM-Agent 会回退为完整运行。
 
 ### 实时监控面板
 
