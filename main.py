@@ -3,7 +3,6 @@ from config import (
     OPENCODE_SETUP_MODEL,
     OPENCODE_SPEC_MODEL,
     OPENCODE_MODEL_PROVIDER,
-    LLM_MODEL,
 )
 from src.entry_reasoning_pipeline import run_entry_pipeline
 from src.file_utils import collect_file_names, is_file_ready
@@ -218,7 +217,7 @@ def _get_incomplete_verification_files(layer_files, input_dir, output_dir, work_
 def _setup_outputs_complete(work_dir):
     """Return True only if the setup_context stage produced ALL its output files.
 
-    The setup stage (Stage 2) is responsible for writing, per
+    The setup stage (Stage 1) is responsible for writing, per
     md/workflow_setup_extract.md:
       1. phases.json
       2. spec_prompts/domain_context/engine_overview.txt
@@ -312,7 +311,7 @@ def _phases_cover_current_sources(phases_json, proj_dir):
 def _ensure_source_files_in_phases(phases_json, required_source_files):
     """Force-list ``required_source_files`` in phases.json if the agent omitted them.
 
-    The Stage 2 setup agent decides which source files go into phases.json and may
+    The Stage 1 setup agent decides which source files go into phases.json and may
     leave out files that look like tests. When a caller (e.g. the entry pipeline)
     must have a specific file processed regardless, this puts any missing ones
     alone in a brand-new phase that becomes the earliest phase (number 1); every
@@ -367,12 +366,12 @@ def _ensure_source_files_in_phases(phases_json, required_source_files):
 
 
 def _run_setup_extract(proj_dir, work_dir, script_dir, is_incremental=False, resume=False):
-    """Stage 2: prepare the setup workflow file and run opencode (with retries) to produce phases.json."""
+    """Stage 1: prepare the setup workflow file and run opencode (with retries) to produce phases.json."""
     # On resume, reuse the existing phase plan instead of paying for the
     # setup_context LLM call again.
     _resume_skip_setup = resume and _setup_outputs_complete(work_dir)
     if _resume_skip_setup:
-        print("[Pipeline] Stage 2/5: RESUME — all setup outputs found, skipping setup_context (reusing phase plan).")
+        print("[Pipeline] Stage 1/4: RESUME — all setup outputs found, skipping setup_context (reusing phase plan).")
 
     workflow_src = os.path.join(script_dir, "md", "workflow_setup_extract.md")
     workflow_dst = os.path.join(work_dir, "workflow_setup_extract.md")
@@ -440,7 +439,7 @@ def _run_setup_extract(proj_dir, work_dir, script_dir, is_incremental=False, res
                 metadata={"attempt": attempt},
             )
         except subprocess.CalledProcessError as e:
-            logging.warning(f"Stage 2 attempt {attempt}: opencode exited with code {e.returncode}")
+            logging.warning(f"Stage 1 attempt {attempt}: opencode exited with code {e.returncode}")
 
         # Validate that the agent produced phases.json. In incremental mode the file
         # already exists; it may legitimately remain byte-for-byte unchanged for same-file
@@ -458,14 +457,14 @@ def _run_setup_extract(proj_dir, work_dir, script_dir, is_incremental=False, res
         if attempt < OPENCODE_MAX_RETRIES:
             delay = 10
             print(
-                f"[Pipeline] Stage 2 failed to {failure} (attempt {attempt}/{OPENCODE_MAX_RETRIES}). "
+                f"[Pipeline] Stage 1 failed to {failure} (attempt {attempt}/{OPENCODE_MAX_RETRIES}). "
                 f"Retrying in {delay}s..."
             )
-            logging.warning(f"Stage 2 attempt {attempt} failed: {missing}. Retrying in {delay}s.")
+            logging.warning(f"Stage 1 attempt {attempt} failed: {missing}. Retrying in {delay}s.")
             time.sleep(delay)
         else:
             print(
-                f"[Pipeline] ERROR: Stage 2 failed after {OPENCODE_MAX_RETRIES} attempts. "
+                f"[Pipeline] ERROR: Stage 1 failed after {OPENCODE_MAX_RETRIES} attempts. "
                 f"{missing}. "
                 f"Check {os.path.basename(proj_dir)}/fm_agent/trace/ for details."
             )
@@ -474,22 +473,6 @@ def _run_setup_extract(proj_dir, work_dir, script_dir, is_incremental=False, res
     # Deduplicate source files across phases
     _deduplicate_phases(work_dir)
 
-
-def _run_opencode_init(proj_dir, work_dir):
-    agent_md = os.path.join(proj_dir, "AGENTS.md")
-    if os.path.exists(agent_md):
-        print("[Pipeline] Stage 1/5: AGENTS.md found, skipping opencode init.")
-    else:
-        print("[Pipeline] Stage 1/5: Initializing opencode...")
-        command = ["opencode", "run", "--model", f"{OPENCODE_MODEL_PROVIDER}/{LLM_MODEL}", "--command", "init"]
-        run_opencode_traced(
-            proj_dir=proj_dir,
-            work_dir=work_dir,
-            command=command,
-            stage="init",
-            output_files=["AGENTS.md"],
-            summary="Initialized OpenCode project context",
-        )
 
 @contextlib.contextmanager
 def frozen_worktree(proj_dir, exclude=("fm_agent",), copy_excluded=True):
@@ -604,11 +587,8 @@ def run_pipeline(proj_dir, resume=False, required_source_files=None):
         _clean_previous_run(work_dir)
     os.makedirs(work_dir, exist_ok=True)
 
-    # Initialize opencode in the project directory (skip if AGENTS.md already exists)
-    _run_opencode_init(proj_dir, work_dir)
-
     # Copy workflow_setup_extract.md to proj_dir and run opencode against it
-    print("[Pipeline] Stage 2/5: Understanding codebase and extracting functions ...")
+    print("[Pipeline] Stage 1/4: Understanding codebase and extracting functions ...")
     _run_setup_extract(proj_dir, work_dir, script_dir, resume=resume)
 
     # The setup agent may have omitted required files (e.g. an entry point that
@@ -643,20 +623,20 @@ def run_pipeline(proj_dir, resume=False, required_source_files=None):
         os.path.join(spec_prompts_dir, "file_utils.py"),
     )
 
-    print("[Pipeline] Stage 3/5: Collecting file list...")
+    print("[Pipeline] Stage 2/4: Collecting file list...")
     file_list = collect_file_names(input_dir, os.path.join(work_dir, "fm_agent_file_list.json"))
 
     if not file_list:
         print("[Pipeline] No functions found to verify. Skipping spec generation.")
         return
 
-    # --- Stage 4: Generate topdown layers ---
-    print("[Pipeline] Stage 4/5: Generating topdown layers...")
+    # --- Stage 3: Generate topdown layers ---
+    print("[Pipeline] Stage 3/4: Generating topdown layers...")
     phases_data = json.load(open(os.path.join(work_dir, "phases.json")))
     generate_topdown_layers(work_dir)
 
-    # --- Stage 5: Execute spec generation workflow (per phase, per layer) ---
-    print("[Pipeline] Stage 5/5: Generating specs & verification...")
+    # --- Stage 4: Execute spec generation workflow (per phase, per layer) ---
+    print("[Pipeline] Stage 4/4: Generating specs & verification...")
     batch_md_src = os.path.join(script_dir, "md", "workflow_spec_step4_batch.md")
     batch_md_dst = os.path.join(work_dir, "workflow_spec_step4_batch.md")
     shutil.copy2(batch_md_src, batch_md_dst)
@@ -690,7 +670,7 @@ def run_pipeline(proj_dir, resume=False, required_source_files=None):
         )
 
         for layer_idx in range(total_layers):
-            print(f"[Pipeline] Stage 5/5: Phase {phase_num}/{num_phases} — {phase_name}, Layer {layer_idx}/{total_layers - 1}")
+            print(f"[Pipeline] Stage 4/4: Phase {phase_num}/{num_phases} — {phase_name}, Layer {layer_idx}/{total_layers - 1}")
 
             # Generate batch prompts for this layer. On resume, skip functions
             # that were already specced in a previous run.
@@ -840,18 +820,18 @@ def run_pipeline(proj_dir, resume=False, required_source_files=None):
                 if attempt < OPENCODE_MAX_RETRIES:
                     delay = 10
                     print(
-                        f"[Pipeline] Stage 5 Phase {phase_num} Layer {layer_idx} produced no specs "
+                        f"[Pipeline] Stage 4 Phase {phase_num} Layer {layer_idx} produced no specs "
                         f"(attempt {attempt}/{OPENCODE_MAX_RETRIES}). "
                         f"Retrying in {delay}s..."
                     )
                     logging.warning(
-                        f"Stage 5 Phase {phase_num} Layer {layer_idx} attempt {attempt} failed: "
+                        f"Stage 4 Phase {phase_num} Layer {layer_idx} attempt {attempt} failed: "
                         f"no specs generated. Retrying in {delay}s."
                     )
                     time.sleep(delay)
                 else:
                     print(
-                        f"[Pipeline] ERROR: Stage 5 Phase {phase_num} Layer {layer_idx} failed "
+                        f"[Pipeline] ERROR: Stage 4 Phase {phase_num} Layer {layer_idx} failed "
                         f"after {OPENCODE_MAX_RETRIES} attempts. "
                         f"No specs were generated. "
                         f"Check {os.path.basename(proj_dir)}/fm_agent/trace/ for details."
