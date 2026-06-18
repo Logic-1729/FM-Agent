@@ -45,6 +45,7 @@ class TracedOpenCodeProcess:
     opencode_log_path: str | None = None
     opencode_trace_path: str | None = None
     log_thread: threading.Thread | None = None
+    error: str | None = None
 
 
 def _trace_dir(work_dir):
@@ -120,6 +121,28 @@ def _start_opencode_process(proj_dir, work_dir, event_id, command, trace_log_pat
     )
     log_thread.start()
     return proc, log_thread
+
+
+def _wait_opencode_process(proc, command, stage, timeout_seconds=OPENCODE_TIMEOUT_SECONDS):
+    try:
+        return proc.wait(timeout=timeout_seconds), None
+    except subprocess.TimeoutExpired:
+        # A model connection that dies silently (e.g. through a forward proxy)
+        # leaves opencode waiting forever. Kill it so callers' retry paths can
+        # take over instead of the whole pipeline hanging.
+        logging.warning(
+            "opencode %s timed out after %ss, killing: %s",
+            stage, timeout_seconds, " ".join(command),
+        )
+        proc.terminate()
+        try:
+            exit_code = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            exit_code = proc.wait()
+        if not exit_code:
+            exit_code = -15  # killed-on-timeout must never record as success
+        return exit_code, f"timeout after {timeout_seconds}s"
 
 
 def record_opencode_call(
@@ -204,26 +227,8 @@ def run_opencode_traced(
     log_thread = None
     try:
         proc, log_thread = _start_opencode_process(proj_dir, work_dir, event_id, command, opencode_log_path)
-        try:
-            exit_code = proc.wait(timeout=OPENCODE_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            # A model connection that dies silently (e.g. through a forward proxy)
-            # leaves opencode waiting forever — it has no model-call timeout of its
-            # own. Kill it and surface a CalledProcessError so the caller's retry
-            # path takes over instead of the whole pipeline hanging.
-            logging.warning(
-                "opencode %s timed out after %ds, killing: %s",
-                stage, OPENCODE_TIMEOUT_SECONDS, " ".join(command),
-            )
-            proc.terminate()
-            try:
-                exit_code = proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                exit_code = proc.wait()
-            if not exit_code:
-                exit_code = -15  # killed-on-timeout must never record as success
-            error = f"timeout after {OPENCODE_TIMEOUT_SECONDS}s"
+        exit_code, error = _wait_opencode_process(proc, command, stage)
+        if error:
             raise subprocess.CalledProcessError(exit_code, command)
         if log_thread:
             log_thread.join()
@@ -291,14 +296,27 @@ def start_opencode_traced(
     )
 
 
+def wait_opencode_traced(record, timeout_seconds=OPENCODE_TIMEOUT_SECONDS):
+    exit_code, error = _wait_opencode_process(
+        record.proc,
+        record.command,
+        record.stage,
+        timeout_seconds=timeout_seconds,
+    )
+    if error or record.error is None:
+        record.error = error
+    return exit_code
+
+
 def finish_opencode_trace(record):
     if record.log_thread:
         record.log_thread.join()
+    status = "error" if record.error or record.proc.returncode != 0 else "success"
     record_opencode_call(
         work_dir=record.work_dir,
         event_id=record.event_id,
         stage=record.stage,
-        status="success" if record.proc.returncode == 0 else "error",
+        status=status,
         started=record.started,
         ended=utc_now_iso(),
         command=record.command,
@@ -307,6 +325,7 @@ def finish_opencode_trace(record):
         output_files=record.output_files,
         exit_code=record.proc.returncode,
         summary=record.summary,
+        error=record.error,
         metadata=record.metadata,
         opencode_log_path=record.opencode_log_path,
         opencode_trace_path=record.opencode_trace_path,

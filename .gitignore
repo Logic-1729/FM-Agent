@@ -212,3 +212,6 @@ __marimo__/
 testcase/
 
 .claude/
+
+.public-exclude
+docs/superpowers/

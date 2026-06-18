@@ -43,33 +43,57 @@ How it lines up with `.env`:
 | `options.apiKey` | `LLM_API_KEY` (read from env, never hard-coded) |
 | a key under `models` | `LLM_MODEL` |
 
-To use another endpoint, copy the block, rename it, point `baseURL` at the endpoint, and update `.env` to match. Pick `npm` by API style: `@ai-sdk/openai-compatible` (OpenAI-style: OpenRouter, svip) or `@ai-sdk/anthropic` (Anthropic-style, native `/v1/messages`).
+To use another endpoint, copy the block, rename it, point `baseURL` at the
+endpoint, and update `.env` to match. Pick `npm` by API style:
+`@ai-sdk/openai-compatible` for OpenAI-style endpoints such as OpenRouter, or
+`@ai-sdk/anthropic` for Anthropic-style `/v1/messages` endpoints.
 
-## Prompt caching on a multi-tenant relay (`opencode-svip-proxy`)
+## Third-party LLM services and cache routing
 
-If your endpoint is a multi-tenant relay (e.g. svip) that fans requests across several upstream accounts, prompt caching only pays off when every request in a session lands on the *same* account — otherwise each account has a cold cache and the hit rate stays near zero.
-
-The [`opencode-svip-proxy`](https://www.npmjs.com/package/opencode-svip-proxy) OpenCode plugin fixes this: it wraps `globalThis.fetch` in-process and injects a stable `metadata.user_id` into every Claude request body, so the relay pins the whole session to one account. Add it to the `plugin` array (OpenCode fetches it from npm on first use), and point the provider straight at the relay:
+If you use a third-party LLM service or relay, you may need a stable user id in
+model requests so the service can route repeated calls to the same cache bucket.
+Use the `inject-user-id` OpenCode plugin for OpenCode calls. FM-Agent's direct
+LLM calls read the same `INJECT_HOST` and `INJECT_ID` environment variables, so
+both paths use the same routing id.
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-svip-proxy"],
+  "plugin": [
+    "@lucentia/opencode-trace",
+    "oh-my-openagent@latest",
+    "inject-user-id"
+  ],
   "provider": {
-    "svip": {
-      "npm": "@ai-sdk/openai-compatible",
-      "options": { "baseURL": "https://svip.xty.app/v1", "apiKey": "{env:LLM_API_KEY}" },
-      "models": { "claude-sonnet-4-6": {}, "claude-opus-4-7": {} }
+    "claudecode": {
+      "npm": "@ai-sdk/anthropic",
+      "options": {
+        "baseURL": "xxx",
+        "apiKey": "{env:LLM_API_KEY}"
+      },
+      "models": { "claude-opus-4-8": {} }
     }
   }
 }
 ```
 
-Optional knobs:
+Set the host to inject into before running FM-Agent:
 
 ```bash
-export OPENCODE_METADATA_USER_ID=your-stable-id   # default: a built-in constant
-export OPENCODE_SVIP_HOST=svip.xty.app            # relay host to inject on
+export INJECT_HOST=xxx
+# Optional. Defaults to stable-user-or-session-id-xxxxxxx123.
+export INJECT_ID=stable-user-or-session-id-xxxxxxx123
 ```
 
-FM-Agent's direct reasoner calls (`src/llm_client.py`) bypass OpenCode and already inject their own stable `metadata.user_id`, so they stay sticky without the plugin.
+Then run FM-Agent normally:
+
+```bash
+INJECT_HOST=xxx \
+LLM_API_BASE_URL=xxx \
+LLM_MODEL=claude-opus-4-8 \
+OPENCODE_MODEL_PROVIDER=claudecode \
+python main.py /path/to/project
+```
+
+`INJECT_HOST` can be a comma-separated list of hosts or URL prefixes. Without
+`INJECT_HOST`, the plugin does not inject anything.
