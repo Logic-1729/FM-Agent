@@ -313,6 +313,8 @@ def _extract_functions_brace(lines, lang_key, lang_cfg):
     i = 0
     skip_prefixes = lang_cfg["skip_prefixes"]
     skip_kw_line = lang_cfg["skip_keywords_line"]
+    in_block_comment = False
+    _block_comment_langs = {"cpp", "c", "cuda", "java", "javascript", "typescript", "arkts"}
 
     while i < len(lines):
         line = lines[i]
@@ -322,6 +324,23 @@ def _extract_functions_brace(lines, lang_key, lang_cfg):
         if not stripped:
             i += 1
             continue
+
+        # Skip /* */ block comments for C-family languages
+        if lang_key in _block_comment_langs:
+            if in_block_comment:
+                end_idx = stripped.find("*/")
+                if end_idx != -1:
+                    in_block_comment = False
+                i += 1
+                continue
+            start_idx = stripped.find("/*")
+            if start_idx != -1:
+                # Check whether the block comment closes on the same line
+                after_start = stripped[start_idx + 2:]
+                if "*/" not in after_start:
+                    in_block_comment = True
+                i += 1
+                continue
 
         # Skip comment / preprocessor / using lines
         if any(stripped.startswith(p) for p in skip_prefixes):
