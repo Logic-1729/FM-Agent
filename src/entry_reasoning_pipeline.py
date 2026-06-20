@@ -1,7 +1,6 @@
 import os
 import json
 import shutil
-import filecmp
 import logging
 import tempfile
 from collections import deque, defaultdict
@@ -341,129 +340,37 @@ def _trim_project_in_place(proj_dir, all_by_source, keep_by_source):
 
 
 # ---------------------------------------------------------------------------
-# Source restoration
+# Run-directory copy
 #
-# The entry pipeline trims proj_dir in place before running, and run_pipeline()
-# additionally drives LLM agents with filesystem access that may leave stray
-# edits. We snapshot the project's sources (everything except the fm_agent/
-# workspace and .git) before trimming and restore them afterwards; the
-# generated results under fm_agent/ are kept.
+# The entry pipeline never mutates proj_dir. Instead it copies proj_dir's
+# sources (everything except .git) into a separate run directory, trims and runs
+# the pipeline there, and finally copies the generated fm_agent/ workspace back
+# into proj_dir. This isolates both the trim and any stray edits run_pipeline()'s
+# LLM agents make from the original repo. An existing fm_agent/ is copied along
+# too, so a resumed run picks up where the prior one left off.
 # ---------------------------------------------------------------------------
 
-_RESTORE_SKIP_DIRS = ("fm_agent", ".git")
+_SKIP_DIRS = (".git",)
 
 
-def _iter_source_entries(base):
-    """Yield base-relative paths of all files (and symlinks) under ``base``.
+def _make_run_copy(proj_dir, run_dir):
+    """Copy proj_dir (everything except .git) into a fresh ``run_dir``.
 
-    Directories named in _RESTORE_SKIP_DIRS are skipped entirely. Symlinks to
-    directories are yielded as entries (not descended into) so they get
-    restored as links.
+    Includes an existing ``fm_agent/`` workspace so a resumed pipeline finds the
+    prior run's state. Any leftover run directory from an interrupted run is
+    discarded first: the pristine sources always live in proj_dir, so the copy
+    can be remade cleanly.
     """
-    for root, dirs, files in os.walk(base):
-        dirs[:] = [d for d in dirs if d not in _RESTORE_SKIP_DIRS]
-        links = [d for d in dirs if os.path.islink(os.path.join(root, d))]
-        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
-        for name in files + links:
-            yield os.path.relpath(os.path.join(root, name), base)
-
-
-def _entries_match(src, dst):
-    """True if the backup entry ``src`` and the project entry ``dst`` are identical."""
-    if os.path.islink(src) or os.path.islink(dst):
-        return (
-            os.path.islink(src)
-            and os.path.islink(dst)
-            and os.readlink(src) == os.readlink(dst)
-        )
-    if os.path.isdir(dst):
-        return False
-    # Shallow compare (size + mtime) is reliable here: the backup is made with
-    # copy2 semantics, so untouched files keep matching stats.
-    return filecmp.cmp(src, dst, shallow=True)
-
-
-def _ensure_source_backup(proj_dir, backup_dir):
-    """Snapshot proj_dir's sources (sans fm_agent/.git) into ``backup_dir``.
-
-    An existing backup is reused as-is: it was left by an interrupted run and
-    still holds the pristine sources from before that run, whereas the current
-    tree may already carry that run's trim or stray edits.
-    """
-    if os.path.isdir(backup_dir):
-        print(f"[EntryPipeline] Reusing source backup from an interrupted run at {backup_dir}.")
-        return
-    tmp_dir = backup_dir + ".tmp"
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
+    for stale in (run_dir, run_dir + ".tmp"):
+        if os.path.exists(stale):
+            shutil.rmtree(stale)
+    tmp_dir = run_dir + ".tmp"
     shutil.copytree(
         proj_dir, tmp_dir,
-        ignore=shutil.ignore_patterns(*_RESTORE_SKIP_DIRS),
+        ignore=shutil.ignore_patterns(*_SKIP_DIRS),
         symlinks=True,
     )
-    os.replace(tmp_dir, backup_dir)
-
-
-def _restore_sources(proj_dir, backup_dir):
-    """Restore proj_dir's sources from ``backup_dir``, then delete the backup.
-
-    Files created during the run are removed, modified or deleted files are
-    restored from the backup, and directories created during the run are
-    pruned once empty. Everything under fm_agent/ (and .git) is left alone.
-    """
-    if not os.path.isdir(backup_dir):
-        return
-
-    backup_entries = set(_iter_source_entries(backup_dir))
-    current_entries = set(_iter_source_entries(proj_dir))
-
-    removed = 0
-    for rel in current_entries - backup_entries:
-        path = os.path.join(proj_dir, rel)
-        if os.path.lexists(path):
-            os.remove(path)
-            removed += 1
-
-    restored = 0
-    for rel in backup_entries:
-        src = os.path.join(backup_dir, rel)
-        dst = os.path.join(proj_dir, rel)
-        if os.path.lexists(dst) and _entries_match(src, dst):
-            continue
-        if os.path.lexists(dst):
-            if os.path.isdir(dst) and not os.path.islink(dst):
-                shutil.rmtree(dst)
-            else:
-                os.remove(dst)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(src, dst, follow_symlinks=False)
-        restored += 1
-
-    # Recreate directories that were emptied/deleted during the run.
-    for root, dirs, _files in os.walk(backup_dir):
-        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
-        for d in dirs:
-            rel = os.path.relpath(os.path.join(root, d), backup_dir)
-            os.makedirs(os.path.join(proj_dir, rel), exist_ok=True)
-
-    # Prune directories created during the run, deepest first.
-    candidates = []
-    for root, dirs, _files in os.walk(proj_dir):
-        dirs[:] = [
-            d for d in dirs
-            if d not in _RESTORE_SKIP_DIRS and not os.path.islink(os.path.join(root, d))
-        ]
-        candidates.extend(os.path.relpath(os.path.join(root, d), proj_dir) for d in dirs)
-    for rel in sorted(candidates, key=lambda r: r.count(os.sep), reverse=True):
-        path = os.path.join(proj_dir, rel)
-        if not os.path.isdir(os.path.join(backup_dir, rel)) and not os.listdir(path):
-            os.rmdir(path)
-
-    shutil.rmtree(backup_dir)
-    print(
-        f"[EntryPipeline] Restored project sources: {restored} file(s) restored, "
-        f"{removed} stray file(s) removed."
-    )
+    os.replace(tmp_dir, run_dir)
 
 
 def run_entry_pipeline(proj_dir, entry_func=None, end_funcs=None, resume=False):
@@ -474,20 +381,22 @@ def run_entry_pipeline(proj_dir, entry_func=None, end_funcs=None, resume=False):
          it, optionally restricted to call chains ending at ``end_funcs`` — by
          freshly extracting every function into a temporary workspace and
          building the static call graph. No previous run_pipeline() is assumed.
-      2. Snapshot the project's sources, then delete the unrelated functions
-         and source files from ``proj_dir`` in place.
-      3. Invoke the standard ``run_pipeline`` directly on ``proj_dir``: because
-         only the related functions remain, it naturally specs, reasons about,
-         and bug-validates exactly that set, writing results to
-         ``<proj_dir>/fm_agent/``.
-      4. Restore the deleted functions and files from the snapshot, leaving the
-         generated ``fm_agent/`` workspace untouched. This runs even when the
-         pipeline fails, and also undoes any stray edits the pipeline's agents
-         made outside ``fm_agent/``.
+      2. Copy the project's sources into a separate run directory, then delete
+         the unrelated functions and source files from that copy. ``proj_dir``
+         itself is never modified.
+      3. Invoke the standard ``run_pipeline`` directly on the run directory:
+         because only the related functions remain, it naturally specs, reasons
+         about, and bug-validates exactly that set, writing results to
+         ``<run_dir>/fm_agent/``.
+      4. Copy the generated ``fm_agent/`` workspace back into ``proj_dir`` and
+         discard the run directory. The copy-back runs even when the pipeline
+         fails, so partial results are preserved, and any stray edits the
+         pipeline's agents made stay confined to the discarded run directory.
 
-    The snapshot lives beside the project at ``<proj_dir>.fm-entry-backup``
-    while the pipeline runs and is removed after restoration; if a run is
-    interrupted, the next run reuses it so the pristine sources are never lost.
+    The run directory lives beside the project at ``<proj_dir>.fm-entry-run``
+    while the pipeline runs and is removed afterwards; a leftover one from an
+    interrupted run is discarded and remade, since the pristine sources always
+    remain in ``proj_dir``.
 
     Args:
         proj_dir: path to the project directory.
@@ -556,13 +465,17 @@ def _run_entry_pipeline_inner(proj_dir, work_dir, entry_func, end_funcs, resume)
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
 
-    # 2. Snapshot the sources, then trim proj_dir in place.
-    backup_dir = proj_dir + ".fm-entry-backup"
-    _ensure_source_backup(proj_dir, backup_dir)
+    # 2. Copy the sources into a separate run directory, then trim that copy.
+    # proj_dir is left untouched throughout.
+    run_dir = proj_dir + ".fm-entry-run"
+    run_work_dir = os.path.join(run_dir, "fm_agent")
+    # _make_run_copy brings along an existing fm_agent/, so a resumed run finds
+    # the prior state in run_dir without any extra seeding here.
+    _make_run_copy(proj_dir, run_dir)
     try:
-        _trim_project_in_place(proj_dir, all_by_source, keep_by_source)
+        _trim_project_in_place(run_dir, all_by_source, keep_by_source)
 
-        # 3. Run the standard pipeline directly on the trimmed project.
+        # 3. Run the standard pipeline directly on the run copy.
         # Imported lazily to avoid a circular import (main imports
         # run_entry_pipeline at module load).
         from main import run_pipeline
@@ -571,20 +484,44 @@ def _run_entry_pipeline_inner(proj_dir, work_dir, entry_func, end_funcs, resume)
         # agent omits it (e.g. because it looks like a test), so run_pipeline
         # always extracts and reasons about the entry function.
         run_pipeline(
-            proj_dir,
+            run_dir,
             resume=resume,
             required_source_files=[_entry_func_source_rel(entry_func)],
         )
     finally:
-        # 4. restore the deleted functions/files; fm_agent/ stays untouched.
-        _restore_sources(proj_dir, backup_dir)
+        # 4. Copy the generated fm_agent/ back into proj_dir, then discard the
+        # run directory. Runs even on failure so partial results are preserved.
+        if os.path.isdir(run_work_dir):
+            if os.path.isdir(work_dir):
+                shutil.rmtree(work_dir)
+            shutil.copytree(run_work_dir, work_dir, symlinks=True)
+            print(f"[EntryPipeline] Copied generated fm_agent/ to {work_dir}.")
+        shutil.rmtree(run_dir, ignore_errors=True)
 
-    # Report confirmed bug count from the run.
-    summary_path = os.path.join(work_dir, "bug_validation", "summary.json")
-    if os.path.exists(summary_path):
-        with open(summary_path, "r") as f:
-            summary = json.load(f)
-        confirmed = summary.get("total_confirmed", 0)
-        print(f"[EntryPipeline] Confirmed bugs: {confirmed}")
+    # Report the bug count: the number of MISMATCH verdicts the reasoner wrote
+    # into fm_agent/logic_verification_results/.
+    mismatches = _count_mismatches(os.path.join(work_dir, "logic_verification_results"))
+    print(f"[EntryPipeline] Bugs (mismatches): {mismatches}")
 
     print(f"[EntryPipeline] Done. Results in {work_dir}.")
+
+
+def _count_mismatches(results_dir):
+    """Count MISMATCH verdicts in a logic_verification_results/ tree.
+
+    Each function's verdict is a JSON file nested under per-module directories;
+    a ``"verdict"`` of ``"MISMATCH"`` marks a spec violation (a candidate bug).
+    Unreadable or malformed files are skipped.
+    """
+    count = 0
+    for root, _dirs, files in os.walk(results_dir):
+        for fname in files:
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(root, fname), "r") as f:
+                    if json.load(f).get("verdict") == "MISMATCH":
+                        count += 1
+            except (OSError, ValueError):
+                continue
+    return count
