@@ -943,33 +943,43 @@ if __name__ == "__main__":
     # snapshot commit, so the version to record must come from the real project.
     new_commit = _get_head_commit(proj_dir)
 
+    # With --isolate, the pipeline runs against the snapshot's fm_agent/. Resuming
+    # needs the previous run's fm_agent/ (phases.json, specs, verification results)
+    # to be present in the snapshot, so copy the excluded workspace in for resume
+    # too — not just incremental mode.
     run_ctx = (
-        frozen_worktree(proj_dir, copy_excluded=bool(args.incremental))
+        frozen_worktree(
+            proj_dir, copy_excluded=bool(args.incremental) or resume
+        )
         if args.isolate
         else contextlib.nullcontext(proj_dir)
     )
     with run_ctx as run_dir:
-        # Incremental mode requires a recorded commit to diff against; without a
-        # version.log from a previous run, fall back to the full pipeline.
-        if args.incremental and old_commit:
-            run_incremental_pipeline(run_dir, intent_path, old_commit)
-        else:
-            run_pipeline(run_dir, resume=resume)
-        # Record the commit that was processed. Written after the pipeline since it
-        # recreates fm_agent/; with --isolate it lives in the snapshot and is copied
-        # back to the real project below.
-        _record_version(new_commit, os.path.join(run_dir, "fm_agent"))
-
-        # With --isolate the pipeline ran against a throwaway snapshot, so its
-        # fm_agent/ results live in the snapshot. Copy them back into the real
-        # project so they are not lost when the snapshot is discarded.
-        if args.isolate:
-            src_fm = os.path.join(run_dir, "fm_agent")
-            dst_fm = os.path.join(proj_dir, "fm_agent")
-            if os.path.isdir(src_fm):
-                if os.path.isdir(dst_fm):
-                    shutil.rmtree(dst_fm)
-                shutil.copytree(src_fm, dst_fm, symlinks=True)
-                print(f"[Pipeline] Copied results back to {dst_fm}")
+        try:
+            # Incremental mode requires a recorded commit to diff against; without a
+            # version.log from a previous run, fall back to the full pipeline.
+            if args.incremental and old_commit:
+                run_incremental_pipeline(run_dir, intent_path, old_commit)
+            else:
+                run_pipeline(run_dir, resume=resume)
+            # Record the commit that was processed. Written after the pipeline since
+            # it recreates fm_agent/; with --isolate it lives in the snapshot and is
+            # copied back to the real project below. Only recorded on success so a
+            # partial run does not advance the version baseline.
+            _record_version(new_commit, os.path.join(run_dir, "fm_agent"))
+        finally:
+            # With --isolate the pipeline ran against a throwaway snapshot, so its
+            # fm_agent/ results live in the snapshot. Copy them back into the real
+            # project so they are not lost when the snapshot is discarded — this runs
+            # even when the pipeline crashes or is interrupted mid-run, so partial
+            # progress survives and can be resumed with --resume.
+            if args.isolate:
+                src_fm = os.path.join(run_dir, "fm_agent")
+                dst_fm = os.path.join(proj_dir, "fm_agent")
+                if os.path.isdir(src_fm):
+                    if os.path.isdir(dst_fm):
+                        shutil.rmtree(dst_fm)
+                    shutil.copytree(src_fm, dst_fm, symlinks=True)
+                    print(f"[Pipeline] Copied results back to {dst_fm}")
     end_time = time.time()
     logging.info(f"Total time: {end_time - start_time:.2f} seconds")
