@@ -56,6 +56,9 @@ def _extract_for_selection(proj_dir, tmp_root):
         for fname in files:
             src_path = os.path.join(root, fname)
             src_rel = os.path.relpath(src_path, proj_dir)
+            if not os.path.isfile(src_path):
+                logging.debug("Skipping non-file source path during entry selection: %s", src_rel)
+                continue
             ext = fname.rsplit(".", 1)[-1] if "." in fname else ""
             lang_key = EXT_TO_LANG.get(ext)
             if not lang_key or _is_test_file(src_rel):
