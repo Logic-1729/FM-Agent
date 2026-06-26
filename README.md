@@ -21,7 +21,6 @@ The [website](http://fm-agent.ai/) of FM-Agent provides an online service for re
 
 ## Table of Contents
 
-- [FM-Agent: Scaling Formal Methods to Large Systems via LLM-Based Hoare-Style Reasoning](#fm-agent-scaling-formal-methods-to-large-systems-via-llm-based-hoare-style-reasoning)
   - [Table of Contents](#table-of-contents)
   - [File Structure](#file-structure)
   - [Environment Setup](#environment-setup)
@@ -29,12 +28,7 @@ The [website](http://fm-agent.ai/) of FM-Agent provides an online service for re
       - [Tested macOS Environment](#tested-macos-environment)
     - [Install Dependencies](#install-dependencies)
   - [Configuration](#configuration)
-    - [Structured Trace](#structured-trace)
   - [Quick Start](#quick-start)
-    - [Incremental Mode](#incremental-mode)
-    - [Live Dashboard](#live-dashboard)
-    - [Output](#output)
-      - [Bug Reports (`fm_agent/bug_validation/<bug_id>.md`)](#bug-reports-fm_agentbug_validationbug_idmd)
   - [Important Notes](#important-notes)
   - [Citation](#citation)
   - [Contact](#contact)

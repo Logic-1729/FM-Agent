@@ -24,6 +24,7 @@ FM-Agent 的[官方网站](http://fm-agent.ai/)提供了在线代码库推理服
 - [文件结构](#文件结构)
 - [环境配置](#环境配置)
   - [依赖要求](#依赖要求)
+    - [已测试macOS环境](#已测试macOS环境)
   - [安装依赖](#安装依赖)
 - [参数配置](#参数配置)
 - [快速开始](#快速开始)
@@ -60,7 +61,7 @@ FM-Agent 的[官方网站](http://fm-agent.ai/)提供了在线代码库推理服
 - [@lucentia/opencode-trace](https://www.npmjs.com/package/@lucentia/opencode-trace) 插件 —— 采集 OpenCode 原始 LLM 请求/响应 trace
 - 你所用 provider 的 LLM API 密钥（示例使用 [OpenRouter](https://openrouter.ai/)）
 
-#### 已测试 macOS 环境
+#### 已测试macOS环境
 
 以下 macOS 环境已使用安装脚本测试：
 
