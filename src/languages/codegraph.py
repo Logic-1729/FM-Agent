@@ -140,6 +140,18 @@ class CodeGraphExtractor:
             result[key].add(callee)
         return dict(result)
 
+    def get_all_call_edges(self, lang_keys) -> dict:
+        """Return merged call edges for multiple languages.
+
+        Equivalent to calling get_call_edges for each lang_key and unioning
+        the results into a single {(caller_stem, caller_module): {callee_stems}} dict.
+        """
+        result = {}
+        for lang_key in lang_keys:
+            for key, callees in self.get_call_edges(lang_key).items():
+                result.setdefault(key, set()).update(callees)
+        return result
+
 
 def try_codegraph_init(proj_dir: str) -> None:
     """Run `codegraph init` in proj_dir if the index does not yet exist.

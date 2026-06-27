@@ -289,23 +289,17 @@ def _build_call_graph(phase_files, proj_dir, global_stem_to_fqns=None):
     callers_map = defaultdict(set)  # fqn -> set of caller fqns (within phase)
     all_callees_map = defaultdict(set)  # fqn -> set of callee fqns (any phase)
 
-    # Try codegraph backend for call edges; merge all supported languages.
-    # Falls back to regex scanning per-file when unavailable or language not
-    # yet in REGISTRY.
+    # Try codegraph backend for call edges; falls back to regex per-file when
+    # unavailable or the language is not yet in REGISTRY.
     _cg = CodeGraphExtractor.from_proj_dir(proj_dir)
-    _cg_edges = {}  # {(caller_stem, caller_basename): {callee_stem}}
+    _cg_edges = {}
     if _cg:
         _cg_langs = {
             _detect_lang_from_ext(fp)
             for fp, _ in phase_files
             if _detect_lang_from_ext(fp) in REGISTRY
         }
-        for _lang in _cg_langs:
-            for key, callees in REGISTRY[_lang].call_edges(_cg).items():
-                if key in _cg_edges:
-                    _cg_edges[key] |= callees
-                else:
-                    _cg_edges[key] = set(callees)
+        _cg_edges = _cg.get_all_call_edges(_cg_langs)
 
     for filepath, module_name in phase_files:
         fqn = fqn_map[filepath]
