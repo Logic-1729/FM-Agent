@@ -108,8 +108,6 @@ _COMMON_EXTRA_KEYWORDS = {
 }
 
 
-
-
 def _detect_lang_from_ext(filepath):
     """Detect the language key from a file's extension."""
     base = os.path.basename(filepath)
