@@ -664,7 +664,7 @@ def run_extraction(proj_dir, work_dir=None, force=False, verbose=False):
     with open(phases_path, 'r') as f:
         phases_data = json.load(f)
 
-    _backend_funcs, _backend_langs = batch_extract_all(proj_dir)
+    backend_funcs, backend_langs = batch_extract_all(proj_dir)
 
     # Build source file list from phases.json
     source_files = []
@@ -707,8 +707,8 @@ def run_extraction(proj_dir, work_dir=None, force=False, verbose=False):
             dir_name = src_base
         out_dir = os.path.join(output_base, src_dir, dir_name) if src_dir else os.path.join(output_base, dir_name)
 
-        if src_path in _backend_funcs:
-            funcs = _backend_funcs[src_path]
+        if src_path in backend_funcs:
+            funcs = backend_funcs[src_path]
         else:
             funcs = extract_functions_from_file(src_path, lang_key)
         if not funcs:
@@ -740,7 +740,7 @@ def run_extraction(proj_dir, work_dir=None, force=False, verbose=False):
         return written, skipped
 
     # --- Validation (Step 2) ---
-    validation_failures = _validate_extraction(output_base, backend_langs=_backend_langs)
+    validation_failures = _validate_extraction(output_base, backend_langs=backend_langs)
     if validation_failures:
         logging.warning(
             f"Validation: {len(validation_failures)} file(s) do not contain exactly one function."
