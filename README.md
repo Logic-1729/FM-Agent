@@ -21,15 +21,17 @@ The [website](http://fm-agent.ai/) of FM-Agent provides an online service for re
 
 ## Table of Contents
 
-- [File Structure](#file-structure)
-- [Environment Setup](#environment-setup)
-  - [Requirements](#requirements)
-  - [Install Dependencies](#install-dependencies)
-- [Configuration](#configuration)
-- [Quick Start](#quick-start)
-- [Important Notes](#important-notes)
-- [Citation](#citation)
-- [Contact](#contact)
+  - [Table of Contents](#table-of-contents)
+  - [File Structure](#file-structure)
+  - [Environment Setup](#environment-setup)
+    - [Requirements](#requirements)
+      - [Tested macOS Environment](#tested-macos-environment)
+    - [Install Dependencies](#install-dependencies)
+  - [Configuration](#configuration)
+  - [Quick Start](#quick-start)
+  - [Important Notes](#important-notes)
+  - [Citation](#citation)
+  - [Contact](#contact)
 
 
 ## File Structure
@@ -59,6 +61,20 @@ The [website](http://fm-agent.ai/) of FM-Agent provides an online service for re
 - [oh-my-openagent](https://www.npmjs.com/package/oh-my-openagent) plugin (installed via `bunx`)
 - [@lucentia/opencode-trace](https://www.npmjs.com/package/@lucentia/opencode-trace) plugin — captures raw OpenCode LLM request/response traces (see [Structured Trace](#structured-trace))
 - An LLM API key for your provider (the examples use [OpenRouter](https://openrouter.ai/))
+
+#### Tested macOS Environment
+
+The following macOS environment has been tested with the install script:
+
+- macOS 14.5 (Build 23F79), arm64
+- Darwin 23.5.0
+- Python 3.11.7
+- pip 23.3.1
+- uv 0.7.9
+- OpenCode 1.17.9
+- Bun/bunx 1.3.14
+- Homebrew 6.0.3
+- UnZip 6.00
 
 ### Install Dependencies
 

@@ -17,6 +17,7 @@ from src.opencode_trace import (
 )
 from src.cli_backend import build_agent_command, is_cli_backend_enabled
 from src.incremental_reasoner import run_incremental_pipeline
+from src.languages.codegraph import try_codegraph_init
 import os
 import sys
 import argparse
@@ -130,6 +131,7 @@ def _get_phase_files(phases_data, phase_num, input_dir):
                     if os.path.isfile(fpath):
                         phase_files.append(os.path.relpath(fpath, input_dir))
     return phase_files
+
 
 
 def _clean_previous_run(work_dir):
@@ -609,6 +611,11 @@ def run_pipeline(proj_dir, resume=False, required_source_files=None):
     )
     if forced:
         print(f"[Pipeline] Forced {len(forced)} required source file(s) into phases.json: {', '.join(forced)}")
+
+    # Build codegraph index if codegraph is installed and index not yet present.
+    # Both run_extraction (Stage 2) and generate_topdown_layers (Stage 3) will
+    # automatically use the index when it exists.
+    try_codegraph_init(proj_dir)
 
     # Run function extraction using extract.py
     # force=False on resume preserves already-specced extracted files; on a fresh

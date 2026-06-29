@@ -72,7 +72,10 @@ fi
 
 # ---------- Python packages ----------
 echo "[..] installing Python dependencies"
-python3 -m pip install openai
+if ! python3 -m pip install openai; then
+    echo "[..] pip install failed; syncing Python dependencies with uv"
+    uv sync --locked
+fi
 
 # ---------- unzip ----------
 if command -v unzip &>/dev/null; then
@@ -121,6 +124,14 @@ else
     fi
     echo "[..] installing/updating oh-my-openagent"
     bunx oh-my-openagent install --no-tui --claude=no --gemini=no --copilot=no
+fi
+
+# ---------- codegraph ----------
+if command -v codegraph &>/dev/null; then
+    echo "[ok] codegraph found: $(codegraph --version 2>/dev/null || echo 'unknown version')"
+else
+    echo "[..] installing codegraph"
+    bun install -g @colbymchenry/codegraph
 fi
 
 echo ""
