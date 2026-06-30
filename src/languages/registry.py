@@ -16,7 +16,7 @@ class LanguageHandler:
     """Extraction and call-graph backend for one language.
 
     batch_extract(proj_dir) -> {abs_filepath: [(func_name, body)]}
-    call_edges(proj_dir)    -> {(caller_stem, caller_module): {callee_stems}}
+    call_edges(proj_dir)    -> {caller_fqn: {callee_fqns}}
 
     Each function handles its own backend (e.g. codegraph) internally and
     returns an empty dict when the backend is unavailable.
@@ -61,8 +61,8 @@ def batch_extract_all(proj_dir: str) -> tuple:
 def call_edges_all(proj_dir: str, lang_keys) -> tuple:
     """Call call_edges for each language in lang_keys and merge results.
 
-    Returns (edges, langs) where edges is {(caller_stem, caller_module): {callee_stems}}
-    and langs is the set of language keys that returned data.
+    Returns (edges, langs) where edges is {caller_fqn: {callee_fqns}} and langs is
+    the set of language keys that returned data.
     """
     edges = {}
     langs = set()
